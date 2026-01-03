@@ -51,6 +51,8 @@ class ModelsTesterApp:
         self.sub_hop_size_var = tk.DoubleVar(value=0.025)
         self.n_mels_var = tk.IntVar(value=32)
         self.seq_len_var = tk.IntVar(value=98)
+        self.duration_var = tk.DoubleVar(value=2.5)
+        self.time_limit_var = tk.IntVar(value=20)  # Recording time limit in seconds (minimum 20)
         
         # History Data for Plots
         self.score_history = []
@@ -60,6 +62,8 @@ class ModelsTesterApp:
         self.start_time = 0
         self.raw_audio_snapshot = None # For waveform
         self.current_spectrogram = None # For heatmap
+        self.current_frequency_spectrum = None # For frequency diagram
+        self.frequency_bins = None # Frequency bins for x-axis
         
         # Scaler Data
         self.scaler_mean = None
@@ -77,6 +81,10 @@ class ModelsTesterApp:
         self.save_audio_var = self.save_results_var
         self.user_label_var = tk.StringVar(value="infested") # User expectation
         self.output_dir_var = tk.StringVar(value=self.default_output_dir)
+        
+        # Audio output (monitoring)
+        self.enable_output_var = tk.BooleanVar(value=False)
+        self.output_device_var = tk.StringVar()
         
         # Model
         self.interpreter = None
@@ -119,7 +127,7 @@ class ModelsTesterApp:
         self.root.configure(bg=base_bg)
 
         style.configure("TFrame", background=base_bg)
-        style.configure("TLabel", background=base_bg, foreground=text_color, font=("Helvetica", 10))
+        style.configure("TLabel", background=base_bg, foreground=text_color, font=("Helvetica", 11))
         style.configure("Header.TLabel", background=base_bg, foreground=text_color, font=("Helvetica", 12, "bold"))
         style.configure("Card.TLabelframe", background=base_bg, bordercolor=border_color, relief="solid")
         style.configure("Card.TLabelframe.Label", background=base_bg, foreground=text_color, font=("Helvetica", 11, "bold"))
@@ -144,31 +152,32 @@ class ModelsTesterApp:
         config_frame = ttk.LabelFrame(left_frame, text="Configuration", padding=12, style="Card.TLabelframe")
         config_frame.pack(fill="x", padx=10, pady=5)
         # Allow entries to expand horizontally so browse buttons stay visible on narrower panes
+        config_frame.columnconfigure(0, minsize=150)  # Set minimum width for label column
         config_frame.columnconfigure(1, weight=1)
         
         # Model Path
         ttk.Label(config_frame, text="Model Path (.tflite):").grid(row=0, column=0, sticky="w")
         self.model_path_var = tk.StringVar(value=self.default_model_path)
-        ttk.Entry(config_frame, textvariable=self.model_path_var).grid(row=0, column=1, padx=5, sticky="ew")
+        ttk.Entry(config_frame, textvariable=self.model_path_var).grid(row=0, column=1, padx=(2,2), sticky="ew")
         ttk.Button(config_frame, text="Browse", command=self.load_model_dialog).grid(row=0, column=2)
 
         # Scaler Path
         ttk.Label(config_frame, text="Scaler Path (.npz):").grid(row=1, column=0, sticky="w", pady=5)
         self.scaler_path_var = tk.StringVar(value=self.default_scaler_path)
-        ttk.Entry(config_frame, textvariable=self.scaler_path_var).grid(row=1, column=1, padx=5, sticky="ew")
+        ttk.Entry(config_frame, textvariable=self.scaler_path_var).grid(row=1, column=1, padx=(2,2), sticky="ew")
         ttk.Button(config_frame, text="Browse", command=self.load_scaler_dialog).grid(row=1, column=2)
 
-        # Duration
-        ttk.Label(config_frame, text="Duration (sec):").grid(row=2, column=0, sticky="w", pady=5)
-        self.duration_var = tk.DoubleVar(value=2.5)
-        ttk.Spinbox(config_frame, from_=0.5, to=10.0, increment=0.5, textvariable=self.duration_var, width=10).grid(row=2, column=1, sticky="w", padx=5)
+        # Test Duration (microphone auto-stop)
+        ttk.Label(config_frame, text="Test Duration (sec):").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Spinbox(config_frame, from_=20, to=300, increment=5, textvariable=self.time_limit_var, width=10).grid(row=2, column=1, sticky="w", padx=(2,2))
+        ttk.Label(config_frame, text="Minimum 20 seconds", font=("Helvetica", 10)).grid(row=2, column=2, sticky="w")
 
         # Input Check
         ttk.Label(config_frame, text="Input Source:").grid(row=3, column=0, sticky="w", pady=5)
         self.input_type_var = tk.StringVar(value="mic")
 
         input_frame = ttk.Frame(config_frame)
-        input_frame.grid(row=3, column=1, sticky="w", padx=5)
+        input_frame.grid(row=3, column=1, sticky="w", padx=(2,2))
         ttk.Radiobutton(input_frame, text="Microphone", variable=self.input_type_var, value="mic", command=self.refresh_devices).pack(side="left", padx=5)
         ttk.Radiobutton(input_frame, text="Wav File", variable=self.input_type_var, value="file", command=self.refresh_devices).pack(side="left", padx=5)
 
@@ -178,20 +187,33 @@ class ModelsTesterApp:
         
         self.device_var = tk.StringVar()
         self.device_combo = ttk.Combobox(config_frame, textvariable=self.device_var)
-        self.device_combo.grid(row=4, column=1, padx=5, sticky="ew")
+        self.device_combo.grid(row=4, column=1, padx=(2,2), sticky="ew")
         
         self.file_btn = ttk.Button(config_frame, text="Browse", command=self.browse_wav_file)
+        self.refresh_btn = ttk.Button(config_frame, text="⟳", command=self.refresh_devices, width=3)
+        
+        # Signal preprocessing toggle
+        self.filter_check = ttk.Checkbutton(config_frame, text="Use Bandpass Filter", variable=self.use_filter_var)
+        self.filter_check.grid(row=5, column=0, columnspan=3, sticky="w", pady=5)
+
+        # Audio Output (Monitor) - only for microphone (create widgets before refresh_devices)
+        self.output_check = ttk.Checkbutton(config_frame, text="Monitor Audio", variable=self.enable_output_var, command=self.toggle_output_device)
+        self.output_device_label = ttk.Label(config_frame, text="Output Device:")
+        self.output_device_combo = ttk.Combobox(config_frame, textvariable=self.output_device_var)
+        
+        # Save results (WAV + JSON) - create before refresh_devices
+        self.save_check = ttk.Checkbutton(config_frame, text="Save results and audio", variable=self.save_results_var, command=self.toggle_output_dir)
+        
+        # Output directory for saved audio (create widgets, will be shown/hidden)
+        self.output_dir_label = ttk.Label(config_frame, text="Results Path:")
+        self.output_dir_entry = ttk.Entry(config_frame, textvariable=self.output_dir_var)
+        self.output_dir_btn = ttk.Button(config_frame, text="Browse", command=self.browse_output_dir)
         
         self.refresh_devices()
 
-        # Output directory for saved audio
-        ttk.Label(config_frame, text="Output Dir:").grid(row=5, column=0, sticky="w", pady=5)
-        ttk.Entry(config_frame, textvariable=self.output_dir_var).grid(row=5, column=1, padx=5, sticky="ew")
-        ttk.Button(config_frame, text="Browse", command=self.browse_output_dir).grid(row=5, column=2)
-
-        # Limits Config
-        limits_frame = ttk.LabelFrame(config_frame, text="Thresholds", padding=8, style="Card.TLabelframe")
-        limits_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=5)
+        # Limits Config (outside main configuration block)
+        limits_frame = ttk.LabelFrame(left_frame, text="Thresholds", padding=8, style="Card.TLabelframe")
+        limits_frame.pack(fill="x", padx=10, pady=5)
 
         ttk.Label(limits_frame, text="Score Thresh:").pack(side="left", padx=2)
         self.score_thresh_var = tk.DoubleVar(value=0.5)
@@ -201,20 +223,10 @@ class ModelsTesterApp:
         self.susp_limit_var = tk.IntVar(value=17)
         ttk.Entry(limits_frame, textvariable=self.susp_limit_var, width=5).pack(side="left", padx=2)
 
-        ttk.Label(limits_frame, text="Infested >").pack(side="left", padx=2)
+        ttk.Label(limits_frame, text="Infested >=").pack(side="left", padx=2)
         self.inf_limit_var = tk.IntVar(value=27)
         ttk.Entry(limits_frame, textvariable=self.inf_limit_var, width=5).pack(side="left", padx=2)
-        
-        # User label (expected outcome)
-        ttk.Label(config_frame, text="User Label:").grid(row=7, column=0, sticky="w", pady=5)
-        label_frame = ttk.Frame(config_frame)
-        label_frame.grid(row=7, column=1, sticky="w", padx=5)
-        ttk.Radiobutton(label_frame, text="Infested", variable=self.user_label_var, value="infested").pack(side="left", padx=5)
-        ttk.Radiobutton(label_frame, text="Healthy", variable=self.user_label_var, value="healthy").pack(side="left", padx=5)
 
-        # Save results (WAV + JSON)
-        ttk.Checkbutton(config_frame, text="Save results and audio", variable=self.save_results_var).grid(row=8, column=0, columnspan=3, sticky="w", pady=5)
-        
         # --- Dashboard Frame (Left) ---
         dash_frame = ttk.LabelFrame(left_frame, text="Dashboard", padding=12, style="Card.TLabelframe")
         dash_frame.pack(fill="x", padx=10, pady=5)
@@ -245,8 +257,10 @@ class ModelsTesterApp:
         energy_frame = ttk.Frame(dash_frame)
         energy_frame.pack(fill="x", pady=5)
         ttk.Label(energy_frame, text="Current Energy (RMS):").pack(side="left")
-        self.energy_bar = ttk.Progressbar(energy_frame, orient="horizontal", length=200, mode="determinate", maximum=1.0)
+        self.energy_bar = ttk.Progressbar(energy_frame, orient="horizontal", length=200, mode="determinate", maximum=100)
         self.energy_bar.pack(side="left", padx=10, fill="x", expand=True)
+        self.energy_value_label = ttk.Label(energy_frame, text="0.000")
+        self.energy_value_label.pack(side="left", padx=5)
         
         # --- Control Area (Left) ---
         ctrl_frame = ttk.Frame(left_frame, padding=10)
@@ -295,6 +309,7 @@ class ModelsTesterApp:
             return ax, canvas
 
         self.ax_wave, self.canvas_wave = add_plot_section("Waveform")
+        self.ax_freq, self.canvas_freq = add_plot_section("Frequency Spectrum")
         self.ax_hist, self.canvas_hist = add_plot_section("Score Distribution")
         self.ax_spec, self.canvas_spec = add_plot_section("Mel Spectrogram")
         self.ax_energy, self.canvas_energy = add_plot_section("Energy Timeline")
@@ -321,25 +336,26 @@ class ModelsTesterApp:
         frame = ttk.Frame(settings_win, padding=20)
         frame.pack(fill="both", expand=True)
 
-        ttk.Checkbutton(frame, text="Use Bandpass Filter", variable=self.use_filter_var).grid(row=0, column=0, columnspan=2, sticky="w", pady=5)
-        
-        ttk.Label(frame, text="Low Cut (Hz):").grid(row=1, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.low_cut_var, width=15).grid(row=1, column=1, padx=5)
+        ttk.Label(frame, text="Low Cut (Hz):").grid(row=0, column=0, sticky="w", pady=5)
+        ttk.Entry(frame, textvariable=self.low_cut_var, width=15).grid(row=0, column=1, padx=5)
 
-        ttk.Label(frame, text="Up Cut (Hz):").grid(row=2, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.up_cut_var, width=15).grid(row=2, column=1, padx=5)
+        ttk.Label(frame, text="Up Cut (Hz):").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Entry(frame, textvariable=self.up_cut_var, width=15).grid(row=1, column=1, padx=5)
 
-        ttk.Label(frame, text="FFT Win Size (s):").grid(row=3, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.sub_win_size_var, width=15).grid(row=3, column=1, padx=5)
+        ttk.Label(frame, text="FFT Win Size (s):").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Entry(frame, textvariable=self.sub_win_size_var, width=15).grid(row=2, column=1, padx=5)
 
-        ttk.Label(frame, text="Hop Size (s):").grid(row=4, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.sub_hop_size_var, width=15).grid(row=4, column=1, padx=5)
+        ttk.Label(frame, text="Hop Size (s):").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Entry(frame, textvariable=self.sub_hop_size_var, width=15).grid(row=3, column=1, padx=5)
 
-        ttk.Label(frame, text="Mel Bands:").grid(row=5, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.n_mels_var, width=15).grid(row=5, column=1, padx=5)
+        ttk.Label(frame, text="Mel Bands:").grid(row=4, column=0, sticky="w", pady=5)
+        ttk.Entry(frame, textvariable=self.n_mels_var, width=15).grid(row=4, column=1, padx=5)
 
-        ttk.Label(frame, text="Seq Len (frames):").grid(row=6, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.seq_len_var, width=15).grid(row=6, column=1, padx=5)
+        ttk.Label(frame, text="Seq Len (frames):").grid(row=5, column=0, sticky="w", pady=5)
+        ttk.Entry(frame, textvariable=self.seq_len_var, width=15).grid(row=5, column=1, padx=5)
+
+        ttk.Label(frame, text="Duration (sec):").grid(row=6, column=0, sticky="w", pady=5)
+        ttk.Spinbox(frame, from_=0.5, to=10.0, increment=0.5, textvariable=self.duration_var, width=15).grid(row=6, column=1, padx=5)
 
         ttk.Button(frame, text="Close", command=settings_win.destroy).grid(row=7, column=0, columnspan=2, pady=20)
 
@@ -347,20 +363,84 @@ class ModelsTesterApp:
         input_type = self.input_type_var.get()
         if input_type == 'mic':
             self.file_btn.grid_remove()
-            self.device_combo.grid(row=4, column=1, padx=5, sticky="w")
+            self.device_combo.grid(row=4, column=1, padx=(2,2), sticky="ew")
+            self.refresh_btn.grid(row=4, column=2, padx=2)
+            self.device_label.configure(text="Device:")
+            
+            # Show monitor controls for microphone
+            self.output_check.grid(row=6, column=0, columnspan=2, sticky="w", pady=5)
+            
             try:
                 devices = sd.query_devices()
                 input_devices = [f"{i}: {d['name']}" for i, d in enumerate(devices) if d['max_input_channels'] > 0]
                 self.device_combo['values'] = input_devices
                 if input_devices:
                     self.device_combo.current(0)
+                
+                # Populate output devices
+                output_devices = [f"{i}: {d['name']}" for i, d in enumerate(devices) if d['max_output_channels'] > 0]
+                self.output_device_combo['values'] = output_devices
+                if output_devices:
+                    self.output_device_combo.current(0)
+                
+                self.log("Audio devices refreshed")
             except Exception as e:
                 self.log(f"Error listing devices: {e}")
+            
+            # Show monitor checkbox for microphone mode
+            self.output_check.grid(row=6, column=0, columnspan=2, sticky="w", pady=5)
+            
+            # Show/hide output device selector and position save controls
+            self.toggle_output_device()
         else:
-            self.device_combo.grid_remove()
+            self.device_combo.grid(row=4, column=1, padx=(2,2), sticky="ew")
+            self.refresh_btn.grid_remove()
             self.file_btn.grid(row=4, column=2)
             self.device_label.configure(text="Wav File:")
-            self.device_combo.grid(row=4, column=1, padx=5, sticky="w") # reuse combo as entry for file
+            
+            # Hide monitor controls for file mode
+            self.output_check.grid_remove()
+            self.output_device_label.grid_remove()
+            self.output_device_combo.grid_remove()
+            self.save_check.grid_remove()
+            self.output_dir_label.grid_remove()
+            self.output_dir_entry.grid_remove()
+            self.output_dir_btn.grid_remove()
+            # reuse combo as entry for file path display
+    
+    def toggle_output_device(self):
+        """Show or hide output device selector based on Monitor Audio checkbox"""
+        if self.enable_output_var.get():
+            self.output_device_label.grid(row=7, column=0, sticky="w", pady=5)
+            self.output_device_combo.grid(row=7, column=1, padx=(2,2), sticky="ew")
+            # Save checkbox moves to row 8
+            self.save_check.grid(row=8, column=0, columnspan=3, sticky="w", pady=5)
+        else:
+            self.output_device_label.grid_remove()
+            self.output_device_combo.grid_remove()
+            # Save checkbox moves to row 7 (no output device showing, monitor checkbox is at row 6)
+            self.save_check.grid(row=7, column=0, columnspan=3, sticky="w", pady=5)
+        
+        # Update output dir visibility
+        self.toggle_output_dir()
+    
+    def toggle_output_dir(self):
+        """Show or hide output directory based on Save checkbox"""
+        if self.save_results_var.get():
+            # Position depends on whether monitor audio is enabled
+            if self.enable_output_var.get():
+                # After save checkbox at row 8, so output dir at row 9
+                row = 9
+            else:
+                # After save checkbox at row 7, so output dir at row 8
+                row = 8
+            self.output_dir_label.grid(row=row, column=0, sticky="w", pady=5)
+            self.output_dir_entry.grid(row=row, column=1, padx=(2,2), sticky="ew")
+            self.output_dir_btn.grid(row=row, column=2)
+        else:
+            self.output_dir_label.grid_remove()
+            self.output_dir_entry.grid_remove()
+            self.output_dir_btn.grid_remove()
             
     def display_file_entry(self):
         # Helper to swtich UI for file mode
@@ -387,8 +467,9 @@ class ModelsTesterApp:
             self.output_dir_var.set(path)
             
     def log(self, message):
-        self.status_log.insert(tk.END, message)
-        self.status_log.see(tk.END)
+        if hasattr(self, 'status_log'):
+            self.status_log.insert(tk.END, message)
+            self.status_log.see(tk.END)
         
     def load_resources(self):
         # Load Model
@@ -445,6 +526,7 @@ class ModelsTesterApp:
         self.trigger_history = []
         self.energy_history = []
         self.start_time = time.time()
+        self.recording_start_time = time.time()  # Track when recording started
         
         self.start_btn.configure(text="STOP TEST")
         self.audio_queue = queue.Queue()
@@ -465,15 +547,76 @@ class ModelsTesterApp:
         self.is_running = False
         if self.audio_thread:
             self.audio_thread.join(timeout=1.0)
+        
+        # Wait a bit for any final callbacks to complete
+        time.sleep(0.2)
+        
+        # Process any remaining chunks in the queue
+        remaining_count = 0
+        try:
+            while True:
+                item = self.audio_queue.get_nowait()
+                if isinstance(item, tuple) and item[0] == "ERROR":
+                    self.log(f"Error: {item[1]}")
+                    break
+                # Process remaining audio chunks
+                self.handle_audio_chunk(item)
+                remaining_count += 1
+        except queue.Empty:
+            pass
+        
+        if remaining_count > 0:
+            self.log(f"Processed {remaining_count} remaining chunks")
+        
         self.start_btn.configure(text="START TEST")
         predicted_infested = self.calculate_diagnosis()
 
         audio_path = None
         if self.save_results_var.get():
-            if self.input_type_var.get() == "mic":
-                audio_path = self.save_audio_snapshot(predicted_infested)
-            self.save_results(predicted_infested, audio_path)
+            # Ask user for label before saving
+            user_label = self.ask_user_label()
+            if user_label:  # Only save if user didn't cancel
+                self.user_label_var.set(user_label)  # Set the label for use in file naming
+                if self.input_type_var.get() == "mic":
+                    audio_path = self.save_audio_snapshot(predicted_infested)
+                self.save_results(predicted_infested, audio_path)
+            else:
+                self.log("Save cancelled; results not written")
         self.log("Test Stopped.")
+    
+    def ask_user_label(self):
+        """Show dialog to ask user for label before saving"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Save Results")
+        dialog.geometry("350x150")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        result = {"label": None}
+        
+        ttk.Label(dialog, text="What is the expected label for this sample?", font=("Helvetica", 11)).pack(pady=15)
+        
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(pady=10)
+        
+        def select_label(label):
+            result["label"] = label
+            dialog.destroy()
+        
+        ttk.Button(button_frame, text="Infested", command=lambda: select_label("infested"), width=12).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="Healthy", command=lambda: select_label("healthy"), width=12).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="Unknown", command=lambda: select_label("unknown"), width=12).pack(side="left", padx=5)
+        
+        ttk.Button(dialog, text="Cancel", command=dialog.destroy).pack(pady=5)
+        
+        self.root.wait_window(dialog)
+        return result["label"]
         
     def calculate_diagnosis(self):
         pos = self.positive_count
@@ -483,7 +626,7 @@ class ModelsTesterApp:
         
         if pos < susp_limit:
             self.diag_label.configure(text=f"HEALTHY (Pos: {pos})", foreground="green")
-        elif pos <= inf_limit:
+        elif pos < inf_limit:
             self.diag_label.configure(text=f"SUSPICIOUS (Pos: {pos})", foreground="orange")
         else:
             self.diag_label.configure(text=f"INFESTED (Pos: {pos})", foreground="red")
@@ -491,7 +634,15 @@ class ModelsTesterApp:
         return predicted_infested
 
     def mic_loop(self, device_idx):
-        self.log(f"Starting Mic Stream on Device {device_idx}...")
+        time_limit = self.time_limit_var.get()
+        if time_limit > 0:
+            self.log(f"Starting Mic Stream on Device {device_idx} (Time Limit: {time_limit}s)...")
+            # Calculate expected number of chunks (0.5s per chunk)
+            expected_chunks = int(time_limit / 0.5)
+            self.log(f"Expected chunks: {expected_chunks}")
+        else:
+            self.log(f"Starting Mic Stream on Device {device_idx} (No Time Limit)...")
+            expected_chunks = 0
         
         sample_rate = 44100
         buffer_duration = self.duration_var.get()
@@ -502,14 +653,76 @@ class ModelsTesterApp:
         
         block_size = int(sample_rate * 0.5) # 0.5 sec blocks
         
+        # Chunk counter
+        chunk_count = [0]  # Use list to allow modification in callback
+        
+        # Monitoring buffer for output (store latest block)
+        monitor_buffer = {
+            "data": np.zeros((block_size, 1), dtype=np.float32)
+        }
+        
+        # Prepare output device if monitoring is enabled
+        output_device_idx = None
+        if self.enable_output_var.get():
+            try:
+                output_device_idx = int(self.output_device_var.get().split(":")[0])
+                self.log(f"Audio monitoring enabled on device {output_device_idx}")
+            except:
+                self.log("Warning: Could not parse output device, monitoring disabled")
+        
         def callback(indata, frames, time, status):
+            chunk_count[0] += 1
             self.audio_queue.put(indata.copy())
+            # Update monitor buffer with latest block
+            monitor_buffer["data"] = indata.copy()
             
         try:
-            with sd.InputStream(device=device_idx, channels=1, samplerate=sample_rate, 
-                                blocksize=block_size, callback=callback):
-                while self.is_running:
-                    time.sleep(0.1)
+            if output_device_idx is not None:
+                # Single output stream with callback fed from latest monitored buffer
+                def output_callback(outdata, frames, time, status):
+                    buf = monitor_buffer.get("data")
+                    if buf is None or buf.size == 0:
+                        outdata.fill(0)
+                        return
+                    # Ensure shape match and pad/trim as needed
+                    if buf.shape[0] < frames:
+                        padded = np.zeros((frames, 1), dtype=np.float32)
+                        padded[:buf.shape[0], :] = buf
+                        outdata[:] = padded
+                    else:
+                        outdata[:] = buf[:frames]
+
+                with sd.InputStream(
+                    device=device_idx,
+                    channels=1,
+                    samplerate=sample_rate,
+                    blocksize=block_size,
+                    callback=callback,
+                ) as _input_stream, sd.OutputStream(
+                    device=output_device_idx,
+                    channels=1,
+                    samplerate=sample_rate,
+                    blocksize=block_size,
+                    callback=output_callback,
+                ) as _output_stream:
+                    while self.is_running:
+                        # Check chunk limit if set (0 means no limit)
+                        if expected_chunks > 0 and chunk_count[0] >= expected_chunks:
+                            self.log(f"Chunk limit reached ({chunk_count[0]} chunks). Stopping...")
+                            self.is_running = False
+                            break
+                        time.sleep(0.05)
+            else:
+                # No output, just input
+                with sd.InputStream(device=device_idx, channels=1, samplerate=sample_rate, 
+                                    blocksize=block_size, callback=callback):
+                    while self.is_running:
+                        # Check chunk limit if set (0 means no limit)
+                        if expected_chunks > 0 and chunk_count[0] >= expected_chunks:
+                            self.log(f"Chunk limit reached ({chunk_count[0]} chunks). Stopping...")
+                            self.is_running = False
+                            break
+                        time.sleep(0.05)
         except Exception as e:
             self.audio_queue.put(("ERROR", str(e)))
             
@@ -597,9 +810,12 @@ class ModelsTesterApp:
         if user_choice == "infested":
             tag = "TP" if predicted_infested else "FN"
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        else: # healthy
+        elif user_choice == "healthy":
             tag = "TN" if not predicted_infested else "FP"
             timestamp = datetime.now().strftime("%Y%m%d_%I%M%p") if tag == "TN" else datetime.now().strftime("%Y%m%d_%H%M%S")
+        else:  # unknown
+            tag = "U"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         out_dir = self.output_dir_var.get().strip() or "recordings"
         os.makedirs(out_dir, exist_ok=True)
@@ -630,6 +846,9 @@ class ModelsTesterApp:
                 "scaler_path": self.scaler_path_var.get(),
                 "user_label": self.user_label_var.get(),
                 "predicted_infested": bool(predicted_infested),
+                    "positive_count": self.positive_count,
+                    "negative_count": self.negative_count,
+                    "total_processed": self.positive_count + self.negative_count,
                 "score_thresh": self.score_thresh_var.get(),
                 "susp_limit": self.susp_limit_var.get(),
                 "inf_limit": self.inf_limit_var.get(),
@@ -661,7 +880,10 @@ class ModelsTesterApp:
             # 0. Calculate Energy (RMS)
             rms = np.sqrt(np.mean(audio_data**2))
             self.current_energy = rms
-            self.energy_bar["value"] = min(rms * 100, 100) # Scaling for visibility, assuming max ~1.0
+            scaled_rms = min(rms * 100, 100)
+            self.energy_bar["value"] = scaled_rms  # Progressbar scaled to 0-100
+            if hasattr(self, "energy_value_label"):
+                self.energy_value_label.config(text=f"{rms:.3f}")
             
             # 1. Extract Features with Config
             specs = self.processor.extract_features(
@@ -678,6 +900,23 @@ class ModelsTesterApp:
             
             # Save for plotting (Mel Spectrogram in dB)
             self.current_spectrogram = specs.copy()
+            
+            # Calculate Frequency Spectrum using FFT
+            fft_size = 4096
+            if len(audio_data) >= fft_size:
+                # Use the last fft_size samples
+                fft_data = audio_data[-fft_size:]
+                # Apply window to reduce spectral leakage
+                window = np.hanning(fft_size)
+                windowed_data = fft_data * window
+                # Compute FFT
+                fft_vals = np.fft.rfft(windowed_data)
+                fft_magnitude = np.abs(fft_vals)
+                # Convert to dB scale
+                fft_magnitude_db = 20 * np.log10(fft_magnitude + 1e-10)
+                # Create frequency bins (Hz)
+                self.frequency_bins = np.fft.rfftfreq(fft_size, 1/44100)
+                self.current_frequency_spectrum = fft_magnitude_db
             
             # 2. Scale
             specs_scaled = self.processor.apply_scaler(specs, self.scaler_mean, self.scaler_var)
@@ -740,6 +979,22 @@ class ModelsTesterApp:
                 self.ax_wave.set_ylim(-1, 1)
                 self.ax_wave.grid(True)
                 self.canvas_wave.draw()
+            
+            # Update Frequency Spectrum
+            if self.current_frequency_spectrum is not None and self.frequency_bins is not None:
+                self.ax_freq.clear()
+                # Plot frequency spectrum, limit to 0-10kHz for better visualization
+                freq_limit = 10000  # Hz
+                freq_mask = self.frequency_bins <= freq_limit
+                self.ax_freq.plot(self.frequency_bins[freq_mask], 
+                                 self.current_frequency_spectrum[freq_mask], 
+                                 'b-', linewidth=0.8)
+                self.ax_freq.set_title("Frequency Spectrum (FFT)")
+                self.ax_freq.set_xlabel("Frequency (Hz)")
+                self.ax_freq.set_ylabel("Magnitude (dB)")
+                self.ax_freq.set_xlim(0, freq_limit)
+                self.ax_freq.grid(True, alpha=0.3)
+                self.canvas_freq.draw()
             
             # Update Histogram (Score)
             if self.score_history:

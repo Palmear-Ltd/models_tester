@@ -42,24 +42,27 @@ python launcher.py
 - **Scaler Path**: Click "Browse" and select your `scaler.npz` file.
     - *Note: The scaler must match the one used during training.*
 - **Duration**: Set the sliding window duration (default is **2.5 seconds**).
+- **Mic Time Limit**: Optional auto-stop duration in seconds. The mic stream stops after the corresponding number of 0.5s chunks (e.g., 20s ≈ 40 chunks).
 - **Thresholds**:
     - **Score Thresh**: Minimum confidence score (0.0 - 1.0) to count as Positive (default 0.5).
     - **Suspicious >=**: Minimum positive samples to classify result as "Suspicious" (default 17).
-    - **Infested >**: Minimum positive samples to classify result as "Infested" (default 27).
+    - **Infested >=**: Minimum positive samples to classify result as "Infested" (default 27).
 - **Input Source**:
     - **Microphone**: Uses your computer's mic for real-time testing.
     - **Wav File**: Processes a pre-recorded `.wav` file.
-- **Device**: Select your microphone from the dropdown list.
+- **Device**: Select your microphone from the dropdown list (use **Refresh** to reload devices if hardware changes).
+- **Monitor Audio**: Enable to route mic input to an output device; choose the playback device from the dropdown.
+- **Save Results**: Enable saving detections and a short audio snapshot (mic only). Output folder selector appears only when saving is on.
 
 ### 2. Running a Test
-1.  Click the **START TEST** button.
-2.  **If using Mic**: Speak into the microphone. The tool will continuously update the "Positive" and "Negative" counters based on the model's detection.
-3.  **If using File**: The tool will simulate playback of the file and process it.
-4.  Watch the **Dashboard** for results.
+1. Click **START TEST**.
+2. **Mic**: Speak into the microphone; the app processes 0.5s blocks and updates Positive/Negative counters. Monitoring (if enabled) plays back the latest block to the selected output device.
+3. **File**: The tool simulates real-time playback and processing of the chosen `.wav` file.
+4. Watch the **Dashboard** for results.
     - **RED** = Positive Detection
     - **GREEN** = Negative Detection
-
-5.  Click **STOP TEST** to finish.
+5. Auto-stop triggers when the mic time limit is reached (if set) or click **STOP TEST** manually.
+6. If saving is enabled, a dialog asks for the expected label (Infested / Healthy / Unknown). Cancel skips saving; Unknown tags the filename accordingly. Saved JSON includes positive/negative totals.
 
 ---
 
