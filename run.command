@@ -8,4 +8,5 @@ if [ ! -d ".venv" ]; then
     exit 1
 fi
 
-./.venv/bin/python launcher.py
+# Launch app in foreground (UI shows) and log output; close terminal when app exits.
+exec ./.venv/bin/python launcher.py >/tmp/palmear_app.log 2>&1
