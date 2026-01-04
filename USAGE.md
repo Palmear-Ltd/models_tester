@@ -1,73 +1,295 @@
-# Audio Testing Tool - User Guide
+# Palmear Audio Testing Tool - User Guide
 
-This tool allows you to test audio models using your microphone or recorded wav files.
+A comprehensive guide to using the Palmear Audio Testing Tool for bioacoustic analysis.
 
-## 🚀 First Time Setup
+## 🚀 Getting Started
 
-Before running the tool for the first time, you need to set up the environment.
+### First Time Setup
 
-1.  **Install Python**: Ensure Python 3.9+ is installed.
-2.  **Run Setup Script**:
-    - Open a terminal or command prompt in this folder.
-    - Run the following command:
-      ```bash
-      python setup_env.py
-      ```
-    - This will install all necessary libraries and check your system compatibility.
+1. **Complete installation** following the instructions in `INSTALL.md`
+2. **Prepare your model files**:
+   - `.tflite` model file (TensorFlow Lite model)
+   - `scaler.npz` file (StandardScaler from training)
+3. **Optional**: Prepare test audio files in WAV format
 
-### ⚠️ Common Issues (Linux Users)
-If you are on Linux (Ubuntu/Debian), you may need to install system libraries manually if the setup script complains:
-```bash
-sudo apt-get update
-sudo apt-get install python3-tk libportaudio2
+### Quick Start
+
+1. **Launch the application**:
+   ```bash
+   python launcher.py
+   # Or double-click run.command (macOS)
+   ```
+
+2. **Load your model**:
+   - Click **Browse** next to "Model Path (.tflite)"
+   - Select your TFLite model file
+   - Click **Browse** next to "Scaler Path (.npz)"
+   - Select your scaler file
+
+3. **Click START TEST** to begin testing
+
+## 📖 Main Interface
+
+### Configuration Panel
+
+#### Model Files
+- **Model Path**: Your trained TensorFlow Lite model (`.tflite`)
+- **Scaler Path**: StandardScaler used during training (`.npz`)
+
+#### Input Source
+- **Microphone**: Real-time audio from your microphone
+  - Select device from dropdown menu
+  - Use **⟳ Refresh** if your device doesn't appear
+- **Wav File**: Pre-recorded audio file
+  - Click **Browse** to select a `.wav` file
+
+#### Detection Thresholds
+- **Score Thresh**: Confidence threshold (0.0-1.0) for classification
+  - Higher = stricter (fewer false positives)
+  - Lower = more sensitive (may increase false positives)
+- **Suspicious >=**: Minimum positive detections for "Suspicious" label
+- **Infested >=**: Minimum positive detections for "Infested" label
+
+### Dashboard
+
+Real-time statistics and classification:
+- **POSITIVE**: Count of frames classified as positive
+- **NEGATIVE**: Count of frames classified as negative  
+- **Diagnosis**: Overall assessment based on thresholds
+  - 🟢 **HEALTHY**: Below suspicious threshold
+  - 🟠 **SUSPICIOUS**: Between thresholds
+  - 🔴 **INFESTED**: Above infested threshold
+- **Current Energy (RMS)**: Audio input level indicator
+
+### Visualization Plots
+
+The right panel shows real-time visualizations:
+
+1. **Waveform**: Raw audio signal over time
+2. **Frequency Spectrum**: Frequency content analysis (FFT)
+3. **Score Distribution**: Histogram of confidence scores
+4. **Mel Spectrogram**: Time-frequency representation (heatmap)
+5. **Energy Timeline**: RMS energy over time
+6. **Trigger Timeline**: Detection events over time
+
+Use the toolbar above each plot to:
+- 🏠 Reset view
+- ⬅️ ➡️ Pan
+- 🔍 Zoom
+- 💾 Save plot as image
+
+## ⚙️ Settings
+
+Open **Settings** from the File menu to access advanced configuration.
+
+### Model Settings
+
+Core parameters that should match your training configuration:
+
+- **Duration (sec)**: Audio window duration
+  - Default: 2.5 seconds
+  - Should match training window size
+  
+- **Sequence Length (frames)**: Number of time frames
+  - Default: 98 frames
+  - Must match model input shape
+  
+- **Mel Bands**: Number of mel frequency bands
+  - Default: 32 bands
+  - Must match model input shape
+  
+- **FFT Window Size (s)**: Short-time FFT window
+  - Default: 0.05 seconds (50ms)
+  - Affects frequency resolution
+  
+- **Hop Size (s)**: Overlap between windows
+  - Default: 0.025 seconds (25ms)
+  - Affects time resolution
+
+### Bandpass Filter (Optional)
+
+Remove unwanted frequencies from audio:
+
+- **Enable Filter**: Toggle bandpass filtering on/off
+- **Low Cut (Hz)**: High-pass filter cutoff
+  - Default: 500 Hz
+  - Removes low-frequency noise
+- **Up Cut (Hz)**: Low-pass filter cutoff
+  - Default: 8000 Hz
+  - Removes high-frequency noise
+
+**When to use**: Enable if your training data was filtered, or to reduce environmental noise.
+
+### Sample Rate & Normalization
+
+Advanced preprocessing options:
+
+- **Downsample Audio**: Optional downsampling before processing
+  - Enable to reduce computational load
+  - Useful for high sample rate recordings
+  
+- **Target Sample Rate (Hz)**: Downsample target rate
+  - Range: 8000-44100 Hz
+  - Lower = faster processing, less detail
+  
+- **Use PCEN Normalization**: Specialized normalization
+  - ✅ **PCEN**: Optimized for bioacoustics
+    - Better for varying background noise
+    - Bioacoustic-optimized parameters
+  - ❌ **Log (dB)**: Standard log scaling
+    - Traditional approach
+    - Good for controlled environments
+
+**Important**: Use the same normalization method as training!
+
+## 🎤 Microphone Testing
+
+### Setup
+
+1. **Select Input Source**: Choose "Microphone"
+2. **Select Device**: Pick your microphone from dropdown
+3. **Set Time Limit** (optional):
+   - 0 = No limit (manual stop only)
+   - >20 = Auto-stop after N seconds
+4. **Monitor Audio** (optional):
+   - Enable to hear what the mic captures
+   - Select output device for playback
+
+### Running a Test
+
+1. Click **START TEST**
+2. Speak/play audio near the microphone
+3. Watch the dashboard update in real-time
+4. Click **STOP TEST** or wait for auto-stop
+
+### Saving Results
+
+Enable **"Save results and audio"**:
+- Short audio clips are saved automatically
+- JSON files contain detection statistics
+- Choose output directory with **Browse**
+
+After stopping:
+1. Dialog asks for expected label:
+   - **Infested**: Sample should be classified as infested
+   - **Healthy**: Sample should be clean
+   - **Unknown**: Unsure or mixed
+2. Files are saved with labels:
+   - `TP_` = True Positive (correctly detected infested)
+   - `TN_` = True Negative (correctly detected healthy)
+   - `FP_` = False Positive (falsely detected infested)
+   - `FN_` = False Negative (missed detection)
+
+## 📁 File Testing
+
+### Setup
+
+1. **Select Input Source**: Choose "Wav File"
+2. Click **Browse** to select a WAV file
+3. Configure thresholds and settings as needed
+
+### Running a Test
+
+1. Click **START TEST**
+2. The file is processed in simulated real-time
+   - Mimics live microphone processing
+   - Allows monitoring the progression
+3. Wait for completion or click **STOP TEST**
+
+**Note**: File testing does NOT save audio (original file already exists)
+
+## 📊 Understanding Results
+
+### Score Interpretation
+
+- **Score = 0.0**: Very confident NEGATIVE
+- **Score ≈ 0.5**: Uncertain (near decision boundary)
+- **Score = 1.0**: Very confident POSITIVE
+
+### Classification Logic
+
+The tool uses a two-level threshold system:
+
+```
+Positive Count < Suspicious Threshold  → HEALTHY
+Suspicious ≤ Count < Infested          → SUSPICIOUS  
+Infested ≤ Count                       → INFESTED
 ```
 
----
+Example (default: Suspicious=17, Infested=27):
+- 10 positives → HEALTHY
+- 20 positives → SUSPICIOUS
+- 30 positives → INFESTED
 
-## ▶️ How to Run
+### JSON Output Format
 
-To start the application, simply run the launcher:
-
-```bash
-python launcher.py
+Saved JSON files contain:
+```json
+{
+  "timestamp": "2026-01-04_15:30:45",
+  "model": "model.tflite",
+  "total_processed": 50,
+  "positive_count": 28,
+  "negative_count": 22,
+  "predicted": "infested",
+  "user_label": "infested",
+  "classification": "TP",
+  "settings": {
+    "score_threshold": 0.5,
+    "duration": 2.5,
+    ...
+  }
+}
 ```
-*(You can also double-click `launcher.py` if your system is configured to run Python scripts)*
 
----
+## 🔧 Advanced Tips
 
-## 🛠️ Using the Tool
+### Optimizing Performance
 
-### 1. Configuration
-- **Model Path**: Click "Browse" and select your `.tflite` model file.
-- **Scaler Path**: Click "Browse" and select your `scaler.npz` file.
-    - *Note: The scaler must match the one used during training.*
-- **Duration**: Set the sliding window duration (default is **2.5 seconds**).
-- **Mic Time Limit**: Optional auto-stop duration in seconds. The mic stream stops after the corresponding number of 0.5s chunks (e.g., 20s ≈ 40 chunks).
-- **Thresholds**:
-    - **Score Thresh**: Minimum confidence score (0.0 - 1.0) to count as Positive (default 0.5).
-    - **Suspicious >=**: Minimum positive samples to classify result as "Suspicious" (default 17).
-    - **Infested >=**: Minimum positive samples to classify result as "Infested" (default 27).
-- **Input Source**:
-    - **Microphone**: Uses your computer's mic for real-time testing.
-    - **Wav File**: Processes a pre-recorded `.wav` file.
-- **Device**: Select your microphone from the dropdown list (use **Refresh** to reload devices if hardware changes).
-- **Monitor Audio**: Enable to route mic input to an output device; choose the playback device from the dropdown.
-- **Save Results**: Enable saving detections and a short audio snapshot (mic only). Output folder selector appears only when saving is on.
+- **Enable downsampling** if processing is slow
+- **Reduce duration** for faster response (but less context)
+- **Lower mel bands** if your model supports it
 
-### 2. Running a Test
-1. Click **START TEST**.
-2. **Mic**: Speak into the microphone; the app processes 0.5s blocks and updates Positive/Negative counters. Monitoring (if enabled) plays back the latest block to the selected output device.
-3. **File**: The tool simulates real-time playback and processing of the chosen `.wav` file.
-4. Watch the **Dashboard** for results.
-    - **RED** = Positive Detection
-    - **GREEN** = Negative Detection
-5. Auto-stop triggers when the mic time limit is reached (if set) or click **STOP TEST** manually.
-6. If saving is enabled, a dialog asks for the expected label (Infested / Healthy / Unknown). Cancel skips saving; Unknown tags the filename accordingly. Saved JSON includes positive/negative totals.
+### Improving Accuracy
 
----
+- **Tune thresholds** based on your validation data
+- **Enable filtering** to reduce noise
+- **Use PCEN** for challenging acoustic environments
+- **Adjust duration** to capture complete vocalizations
 
-## 📁 Files in this Folder
-- `launcher.py`: The main script to run the app.
-- `setup_env.py`: Script to install dependencies.
-- `main.py`: The application code.
-- `requirements.txt`: List of required Python libraries.
+### Troubleshooting
+
+**Low detection count:**
+- Check if audio is reaching the microphone (energy bar)
+- Verify score threshold isn't too high
+- Ensure filter settings match training
+
+**Too many false positives:**
+- Increase score threshold
+- Check for environmental noise
+- Verify model quality with test data
+
+**Choppy playback (monitoring):**
+- Select a different output device
+- Reduce processing complexity (downsample, fewer mel bands)
+
+**Application freezes:**
+- Reduce visualization frequency
+- Close other audio applications
+- Check system resources
+
+## 🎯 Best Practices
+
+1. **Always test with known samples first** to validate setup
+2. **Document your threshold settings** for reproducibility
+3. **Save representative samples** for future analysis
+4. **Use consistent settings** across testing sessions
+5. **Monitor system performance** during long recordings
+
+## 📞 Support
+
+For issues or questions:
+1. Check `INSTALL.md` for setup problems
+2. Verify model and scaler compatibility
+3. Test with provided sample data (if available)
+4. Review error messages in the status log

@@ -15,16 +15,11 @@ import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
-from inference_utils import AudioProcessor
-
-# Try to import TFLite Interpreter
-try:
-    import tflite_runtime.interpreter as tflite
-except ImportError:
-    try:
-        import tensorflow.lite as tflite
-    except ImportError:
-        tflite = None
+from app.audio.processor import AudioProcessor
+from app.audio.features import FeatureExtractor
+from app.audio.scaler import Scaler
+from app.model.inference import ModelInference
+from app.ui.settings_dialog import SettingsDialog
 
 class ModelsTesterApp:
     def __init__(self, root):
@@ -34,6 +29,9 @@ class ModelsTesterApp:
         self.root.minsize(1200, 800)
         
         self.processor = AudioProcessor()
+        self.feature_extractor = FeatureExtractor()
+        self.scaler = Scaler()
+        self.model = ModelInference()
         self.is_running = False
         self.audio_thread = None
         self.audio_queue = queue.Queue()
@@ -88,11 +86,6 @@ class ModelsTesterApp:
         # Audio output (monitoring)
         self.enable_output_var = tk.BooleanVar(value=False)
         self.output_device_var = tk.StringVar()
-        
-        # Model
-        self.interpreter = None
-        self.input_details = None
-        self.output_details = None
 
         self._setup_ui()
         
@@ -326,121 +319,22 @@ class ModelsTesterApp:
         return False
         
     def open_prep_settings(self):
-        settings_win = tk.Toplevel(self.root)
-        settings_win.title("Preprocessing Pipeline Configuration")
-        settings_win.geometry("500x620")
-        settings_win.transient(self.root)
-        settings_win.grab_set()
-
-        # Create a scrollable frame
-        canvas = tk.Canvas(settings_win, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(settings_win, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-        
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-        
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
-        scrollbar.pack(side="right", fill="y")
-
-        # ===== MODEL SETTINGS SECTION =====
-        model_frame = ttk.LabelFrame(scrollable_frame, text="Model Settings", padding=12)
-        model_frame.pack(fill="x", padx=10, pady=10)
-
-        ttk.Label(model_frame, text="Duration (sec):").grid(row=0, column=0, sticky="w", pady=5)
-        ttk.Spinbox(model_frame, from_=0.5, to=10.0, increment=0.5, textvariable=self.duration_var, width=20).grid(row=0, column=1, padx=5, sticky="ew")
-
-        ttk.Label(model_frame, text="Sequence Length (frames):").grid(row=1, column=0, sticky="w", pady=5)
-        ttk.Entry(model_frame, textvariable=self.seq_len_var, width=20).grid(row=1, column=1, padx=5, sticky="ew")
-
-        ttk.Label(model_frame, text="Mel Bands:").grid(row=2, column=0, sticky="w", pady=5)
-        ttk.Entry(model_frame, textvariable=self.n_mels_var, width=20).grid(row=2, column=1, padx=5, sticky="ew")
-
-        ttk.Label(model_frame, text="FFT Window Size (s):").grid(row=3, column=0, sticky="w", pady=5)
-        ttk.Entry(model_frame, textvariable=self.sub_win_size_var, width=20).grid(row=3, column=1, padx=5, sticky="ew")
-
-        ttk.Label(model_frame, text="Hop Size (s):").grid(row=4, column=0, sticky="w", pady=5)
-        ttk.Entry(model_frame, textvariable=self.sub_hop_size_var, width=20).grid(row=4, column=1, padx=5, sticky="ew")
-
-        model_frame.columnconfigure(1, weight=1)
-
-        # ===== BANDPASS FILTER SECTION =====
-        filter_frame = ttk.LabelFrame(scrollable_frame, text="Bandpass Filter (Optional)", padding=12)
-        filter_frame.pack(fill="x", padx=10, pady=10)
-
-        filter_check_frame = ttk.Frame(filter_frame)
-        filter_check_frame.grid(row=0, column=0, columnspan=2, sticky="w", pady=5)
-        filter_check = ttk.Checkbutton(filter_check_frame, variable=self.use_filter_var, command=lambda: self._toggle_filter_settings(filter_low_label, filter_low_entry, filter_up_label, filter_up_entry))
-        filter_check.pack(side="left")
-        ttk.Label(filter_check_frame, text="Enable Filter").pack(side="left", padx=(2, 0))
-
-        filter_low_label = ttk.Label(filter_frame, text="Low Cut (Hz):")
-        filter_low_label.grid(row=1, column=0, sticky="w", pady=5)
-        filter_low_entry = ttk.Entry(filter_frame, textvariable=self.low_cut_var, width=20)
-        filter_low_entry.grid(row=1, column=1, padx=5, sticky="ew")
-
-        filter_up_label = ttk.Label(filter_frame, text="Up Cut (Hz):")
-        filter_up_label.grid(row=2, column=0, sticky="w", pady=5)
-        filter_up_entry = ttk.Entry(filter_frame, textvariable=self.up_cut_var, width=20)
-        filter_up_entry.grid(row=2, column=1, padx=5, sticky="ew")
-
-        filter_frame.columnconfigure(1, weight=1)
-        
-        # Initialize filter settings state
-        self._toggle_filter_settings(filter_low_label, filter_low_entry, filter_up_label, filter_up_entry)
-
-        # ===== SAMPLE RATE & NORMALIZATION SECTION =====
-        sr_frame = ttk.LabelFrame(scrollable_frame, text="Sample Rate & Normalization", padding=12)
-        sr_frame.pack(fill="x", padx=10, pady=10)
-
-        downsample_check_frame = ttk.Frame(sr_frame)
-        downsample_check_frame.grid(row=0, column=0, columnspan=2, sticky="w", pady=5)
-        downsample_check = ttk.Checkbutton(downsample_check_frame, variable=self.enable_downsample_var, command=lambda: self._toggle_downsample_settings(downsample_label, downsample_spin))
-        downsample_check.pack(side="left")
-        ttk.Label(downsample_check_frame, text="Downsample Audio").pack(side="left", padx=(2, 0))
-
-        downsample_label = ttk.Label(sr_frame, text="Target Sample Rate (Hz):")
-        downsample_label.grid(row=1, column=0, sticky="w", pady=5)
-        downsample_spin = ttk.Spinbox(sr_frame, from_=8000, to=44100, increment=2000, textvariable=self.downsample_sr_var, width=20)
-        downsample_spin.grid(row=1, column=1, padx=5, sticky="ew")
-        
-        # Initialize downsample settings state
-        self._toggle_downsample_settings(downsample_label, downsample_spin)
-
-        ttk.Separator(sr_frame, orient="horizontal").grid(row=2, column=0, columnspan=2, sticky="ew", pady=10)
-
-        pcen_check_frame = ttk.Frame(sr_frame)
-        pcen_check_frame.grid(row=3, column=0, columnspan=2, sticky="w", pady=5)
-        ttk.Checkbutton(pcen_check_frame, variable=self.use_pcen_var).pack(side="left")
-        ttk.Label(pcen_check_frame, text="Use PCEN Normalization").pack(side="left", padx=(2, 0))
-
-        ttk.Label(sr_frame, text="(PCEN: bioacoustics, Log: standard)", font=("TkDefaultFont", 8)).grid(row=4, column=0, columnspan=2, sticky="w", pady=0)
-
-        sr_frame.columnconfigure(1, weight=1)
-
-        # ===== CLOSE BUTTON =====
-        button_frame = ttk.Frame(scrollable_frame)
-        button_frame.pack(fill="x", padx=10, pady=15)
-        ttk.Button(button_frame, text="Close", command=settings_win.destroy).pack(fill="x")
-
-    def _toggle_filter_settings(self, low_label, low_entry, up_label, up_entry):
-        """Enable or disable filter settings based on checkbox state."""
-        state = "normal" if self.use_filter_var.get() else "disabled"
-        low_label.configure(state=state)
-        low_entry.configure(state=state)
-        up_label.configure(state=state)
-        up_entry.configure(state=state)
-
-    def _toggle_downsample_settings(self, label, spinbox):
-        """Enable or disable downsample settings based on checkbox state."""
-        state = "normal" if self.enable_downsample_var.get() else "disabled"
-        label.configure(state=state)
-        spinbox.configure(state=state)
+        """Open the preprocessing settings dialog."""
+        config_vars = {
+            'duration_var': self.duration_var,
+            'seq_len_var': self.seq_len_var,
+            'n_mels_var': self.n_mels_var,
+            'sub_win_size_var': self.sub_win_size_var,
+            'sub_hop_size_var': self.sub_hop_size_var,
+            'use_filter_var': self.use_filter_var,
+            'low_cut_var': self.low_cut_var,
+            'up_cut_var': self.up_cut_var,
+            'enable_downsample_var': self.enable_downsample_var,
+            'downsample_sr_var': self.downsample_sr_var,
+            'use_pcen_var': self.use_pcen_var
+        }
+        dialog = SettingsDialog(self.root, config_vars)
+        dialog.show()
 
     def refresh_devices(self):
         input_type = self.input_type_var.get()
@@ -561,18 +455,15 @@ class ModelsTesterApp:
             messagebox.showerror("Error", "Model file not found!")
             return False
             
-        if tflite is None:
+        if not ModelInference.is_tflite_available():
             messagebox.showerror("Error", "TFLite runtime not installed!")
             return False
             
         try:
-            self.interpreter = tflite.Interpreter(model_path=model_path)
-            self.interpreter.allocate_tensors()
-            self.input_details = self.interpreter.get_input_details()
-            self.output_details = self.interpreter.get_output_details()
+            self.model.load_model(model_path)
             self.log(f"Loaded Model: {os.path.basename(model_path)}")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load model: {e}")
+            messagebox.showerror("Error", str(e))
             return False
             
         # Load Scaler
@@ -581,7 +472,7 @@ class ModelsTesterApp:
             messagebox.showerror("Error", "Scaler file not found!")
             return False
             
-        self.scaler_mean, self.scaler_var = self.processor.load_scaler(scaler_path)
+        self.scaler_mean, self.scaler_var = self.scaler.load(scaler_path)
         if self.scaler_mean is None:
             messagebox.showerror("Error", "Failed to load scaler data.")
             return False
@@ -969,7 +860,7 @@ class ModelsTesterApp:
                 self.energy_value_label.config(text=f"{rms:.3f}")
             
             # 1. Extract Features with Config
-            specs = self.processor.extract_features(
+            specs = self.feature_extractor.extract_features(
                 audio_data, 
                 sr=44100,
                 n_mels=self.n_mels_var.get(),
@@ -1005,7 +896,7 @@ class ModelsTesterApp:
                 self.current_frequency_spectrum = fft_magnitude_db
             
             # 2. Scale
-            specs_scaled = self.processor.apply_scaler(specs, self.scaler_mean, self.scaler_var)
+            specs_scaled = self.scaler.apply(specs, self.scaler_mean, self.scaler_var)
             
             # 3. Reshape for Model
             # Model Input: (1, seq_len, n_mels, 1)
@@ -1013,23 +904,9 @@ class ModelsTesterApp:
             n_mels = self.n_mels_var.get()
             input_data = specs_scaled.reshape(1, seq_len, n_mels, 1).astype(np.float32)
             
-            # 4. Invoke
-            self.interpreter.set_tensor(self.input_details[0]['index'], input_data)
-            self.interpreter.invoke()
-            output_data = self.interpreter.get_tensor(self.output_details[0]['index'])
-            
-            # 5. Logic
+            # 4. Invoke Model
             score_thresh = self.score_thresh_var.get()
-            
-            predicted = 0
-            score = 0
-            if output_data.shape[-1] == 1:
-                score = output_data[0][0]
-                predicted = 1 if score > score_thresh else 0
-            else:
-                # Softmax - usually binary still, but if index 1 is positive
-                score = output_data[0][1] # P(Positive)
-                predicted = 1 if score > score_thresh else 0
+            predicted, score = self.model.predict_with_score(input_data, threshold=score_thresh)
 
             # Store stats for plot
             self.score_history.append(score)
