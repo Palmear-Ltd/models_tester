@@ -1,0 +1,11 @@
+librosa
+sounddevice
+soundfile
+tensorflow
+scikit-learn
+scipy
+matplotlib
+numpy
+pandas
+Pillow
+rich
