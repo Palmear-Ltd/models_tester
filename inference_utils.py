@@ -24,7 +24,35 @@ class AudioProcessor:
         b, a = butter(order, normalized_cutoff, btype=btype, analog=False)
         return filtfilt(b, a, y)
 
-    def process_audio(self, y, audio_sr, target_sr=44100, use_filter=True, low_cut=500.0, up_cut=8000.0):
+    def downsample(self, y, orig_sr, target_sr):
+        """
+        Downsample audio to target sample rate using librosa.
+        
+        Args:
+            y: Audio time series
+            orig_sr: Original sample rate
+            target_sr: Target sample rate
+            
+        Returns:
+            Downsampled audio and new sample rate
+        """
+        if orig_sr == target_sr:
+            return y, orig_sr
+        
+        if target_sr > orig_sr:
+            # Don't upsample, just return original
+            return y, orig_sr
+        
+        # Use librosa resample with high-quality Kaiser filter
+        y_resampled = librosa.resample(y, orig_sr=orig_sr, target_sr=target_sr)
+        return y_resampled, target_sr
+
+    def process_audio(self, y, audio_sr, target_sr=44100, use_filter=True, low_cut=500.0, up_cut=8000.0, 
+                      enable_downsample=False, downsample_sr=22050):
+        # Downsample if requested (before resampling to target)
+        if enable_downsample and downsample_sr < audio_sr:
+            y, audio_sr = self.downsample(y, audio_sr, downsample_sr)
+        
         # Resample if needed
         if audio_sr != target_sr:
             y = librosa.resample(y, orig_sr=audio_sr, target_sr=target_sr)
@@ -44,7 +72,8 @@ class AudioProcessor:
     def extract_features(self, audio_data, sr=44100, n_mels=32, 
                          low_cut=500.0, up_cut=8000.0, 
                          sub_win_size_sec=0.05, sub_hop_size_sec=0.025,
-                         use_filter=True, seq_len=98):
+                         use_filter=True, seq_len=98, enable_downsample=False, downsample_sr=22050,
+                         use_pcen=False):
         # Parameters matching training
         fs = sr
         sub_win_size = int(sub_win_size_sec * fs)
@@ -55,10 +84,16 @@ class AudioProcessor:
         
         processed_audio, _ = self.process_audio(audio_data, sr, target_sr=sr, 
                                                 use_filter=use_filter, 
-                                                low_cut=low_cut, up_cut=up_cut)
+                                                low_cut=low_cut, up_cut=up_cut,
+                                                enable_downsample=enable_downsample,
+                                                downsample_sr=downsample_sr)
+        
+        # Determine power value based on normalization method
+        # PCEN uses magnitude (power=1.0), log (dB) uses power spectrum (power=2.0)
+        power_val = 1.0 if use_pcen else 2.0
         
         # Feature Extraction
-        mel_power = librosa.feature.melspectrogram(
+        mel_spec = librosa.feature.melspectrogram(
             y=processed_audio,
             sr=fs,
             n_fft=sub_win_size,
@@ -67,19 +102,37 @@ class AudioProcessor:
             n_mels=n_mels + 1,
             fmin=fmin_mel,
             fmax=fmax_mel,
-            power=2.0
+            power=power_val
         )
         
-        mel_spec_db = librosa.power_to_db(mel_power[:n_mels, :], ref=np.max).T
+        # Apply selected normalization
+        if use_pcen:
+            # Scale by 2**31 for better numerical precision in PCEN
+            # Apply bioacoustic-optimized PCEN parameters matching training
+            mel_spec_normalized = librosa.pcen(
+                mel_spec[:n_mels, :] * (2**31),
+                sr=fs,
+                gain=0.8,
+                bias=10,
+                power=0.25,
+                time_constant=0.06,
+                eps=1e-6
+            )
+        else:
+            # Standard log (dB) normalization
+            mel_spec_normalized = librosa.power_to_db(mel_spec[:n_mels, :], ref=np.max)
         
-        if mel_spec_db.shape[0] > seq_len:
-            mel_spec_db = mel_spec_db[:seq_len, :]
-        elif mel_spec_db.shape[0] < seq_len:
+        # Transpose to [frames, n_mels]
+        mel_spec_normalized = mel_spec_normalized.T
+        
+        if mel_spec_normalized.shape[0] > seq_len:
+            mel_spec_normalized = mel_spec_normalized[:seq_len, :]
+        elif mel_spec_normalized.shape[0] < seq_len:
             # Pad if too short
-            pad_width = seq_len - mel_spec_db.shape[0]
-            mel_spec_db = np.pad(mel_spec_db, ((0, pad_width), (0, 0)), mode='constant')
+            pad_width = seq_len - mel_spec_normalized.shape[0]
+            mel_spec_normalized = np.pad(mel_spec_normalized, ((0, pad_width), (0, 0)), mode='constant')
             
-        return mel_spec_db
+        return mel_spec_normalized
 
     def load_scaler(self, path):
         try:

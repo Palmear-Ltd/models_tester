@@ -53,6 +53,9 @@ class ModelsTesterApp:
         self.seq_len_var = tk.IntVar(value=98)
         self.duration_var = tk.DoubleVar(value=2.5)
         self.time_limit_var = tk.IntVar(value=20)  # Recording time limit in seconds (minimum 20)
+        self.enable_downsample_var = tk.BooleanVar(value=False)
+        self.downsample_sr_var = tk.IntVar(value=22050)  # Target sample rate for downsampling
+        self.use_pcen_var = tk.BooleanVar(value=False)  # Use PCEN normalization instead of log (dB)
         
         # History Data for Plots
         self.score_history = []
@@ -192,10 +195,6 @@ class ModelsTesterApp:
         self.file_btn = ttk.Button(config_frame, text="Browse", command=self.browse_wav_file)
         self.refresh_btn = ttk.Button(config_frame, text="⟳", command=self.refresh_devices, width=3)
         
-        # Signal preprocessing toggle
-        self.filter_check = ttk.Checkbutton(config_frame, text="Use Bandpass Filter", variable=self.use_filter_var)
-        self.filter_check.grid(row=5, column=0, columnspan=3, sticky="w", pady=5)
-
         # Audio Output (Monitor) - only for microphone (create widgets before refresh_devices)
         self.output_check = ttk.Checkbutton(config_frame, text="Monitor Audio", variable=self.enable_output_var, command=self.toggle_output_device)
         self.output_device_label = ttk.Label(config_frame, text="Output Device:")
@@ -329,35 +328,119 @@ class ModelsTesterApp:
     def open_prep_settings(self):
         settings_win = tk.Toplevel(self.root)
         settings_win.title("Preprocessing Pipeline Configuration")
-        settings_win.geometry("400x300")
+        settings_win.geometry("500x620")
         settings_win.transient(self.root)
         settings_win.grab_set()
 
-        frame = ttk.Frame(settings_win, padding=20)
-        frame.pack(fill="both", expand=True)
+        # Create a scrollable frame
+        canvas = tk.Canvas(settings_win, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(settings_win, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+        scrollbar.pack(side="right", fill="y")
 
-        ttk.Label(frame, text="Low Cut (Hz):").grid(row=0, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.low_cut_var, width=15).grid(row=0, column=1, padx=5)
+        # ===== MODEL SETTINGS SECTION =====
+        model_frame = ttk.LabelFrame(scrollable_frame, text="Model Settings", padding=12)
+        model_frame.pack(fill="x", padx=10, pady=10)
 
-        ttk.Label(frame, text="Up Cut (Hz):").grid(row=1, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.up_cut_var, width=15).grid(row=1, column=1, padx=5)
+        ttk.Label(model_frame, text="Duration (sec):").grid(row=0, column=0, sticky="w", pady=5)
+        ttk.Spinbox(model_frame, from_=0.5, to=10.0, increment=0.5, textvariable=self.duration_var, width=20).grid(row=0, column=1, padx=5, sticky="ew")
 
-        ttk.Label(frame, text="FFT Win Size (s):").grid(row=2, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.sub_win_size_var, width=15).grid(row=2, column=1, padx=5)
+        ttk.Label(model_frame, text="Sequence Length (frames):").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Entry(model_frame, textvariable=self.seq_len_var, width=20).grid(row=1, column=1, padx=5, sticky="ew")
 
-        ttk.Label(frame, text="Hop Size (s):").grid(row=3, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.sub_hop_size_var, width=15).grid(row=3, column=1, padx=5)
+        ttk.Label(model_frame, text="Mel Bands:").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Entry(model_frame, textvariable=self.n_mels_var, width=20).grid(row=2, column=1, padx=5, sticky="ew")
 
-        ttk.Label(frame, text="Mel Bands:").grid(row=4, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.n_mels_var, width=15).grid(row=4, column=1, padx=5)
+        ttk.Label(model_frame, text="FFT Window Size (s):").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Entry(model_frame, textvariable=self.sub_win_size_var, width=20).grid(row=3, column=1, padx=5, sticky="ew")
 
-        ttk.Label(frame, text="Seq Len (frames):").grid(row=5, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.seq_len_var, width=15).grid(row=5, column=1, padx=5)
+        ttk.Label(model_frame, text="Hop Size (s):").grid(row=4, column=0, sticky="w", pady=5)
+        ttk.Entry(model_frame, textvariable=self.sub_hop_size_var, width=20).grid(row=4, column=1, padx=5, sticky="ew")
 
-        ttk.Label(frame, text="Duration (sec):").grid(row=6, column=0, sticky="w", pady=5)
-        ttk.Spinbox(frame, from_=0.5, to=10.0, increment=0.5, textvariable=self.duration_var, width=15).grid(row=6, column=1, padx=5)
+        model_frame.columnconfigure(1, weight=1)
 
-        ttk.Button(frame, text="Close", command=settings_win.destroy).grid(row=7, column=0, columnspan=2, pady=20)
+        # ===== BANDPASS FILTER SECTION =====
+        filter_frame = ttk.LabelFrame(scrollable_frame, text="Bandpass Filter (Optional)", padding=12)
+        filter_frame.pack(fill="x", padx=10, pady=10)
+
+        filter_check_frame = ttk.Frame(filter_frame)
+        filter_check_frame.grid(row=0, column=0, columnspan=2, sticky="w", pady=5)
+        filter_check = ttk.Checkbutton(filter_check_frame, variable=self.use_filter_var, command=lambda: self._toggle_filter_settings(filter_low_label, filter_low_entry, filter_up_label, filter_up_entry))
+        filter_check.pack(side="left")
+        ttk.Label(filter_check_frame, text="Enable Filter").pack(side="left", padx=(2, 0))
+
+        filter_low_label = ttk.Label(filter_frame, text="Low Cut (Hz):")
+        filter_low_label.grid(row=1, column=0, sticky="w", pady=5)
+        filter_low_entry = ttk.Entry(filter_frame, textvariable=self.low_cut_var, width=20)
+        filter_low_entry.grid(row=1, column=1, padx=5, sticky="ew")
+
+        filter_up_label = ttk.Label(filter_frame, text="Up Cut (Hz):")
+        filter_up_label.grid(row=2, column=0, sticky="w", pady=5)
+        filter_up_entry = ttk.Entry(filter_frame, textvariable=self.up_cut_var, width=20)
+        filter_up_entry.grid(row=2, column=1, padx=5, sticky="ew")
+
+        filter_frame.columnconfigure(1, weight=1)
+        
+        # Initialize filter settings state
+        self._toggle_filter_settings(filter_low_label, filter_low_entry, filter_up_label, filter_up_entry)
+
+        # ===== SAMPLE RATE & NORMALIZATION SECTION =====
+        sr_frame = ttk.LabelFrame(scrollable_frame, text="Sample Rate & Normalization", padding=12)
+        sr_frame.pack(fill="x", padx=10, pady=10)
+
+        downsample_check_frame = ttk.Frame(sr_frame)
+        downsample_check_frame.grid(row=0, column=0, columnspan=2, sticky="w", pady=5)
+        downsample_check = ttk.Checkbutton(downsample_check_frame, variable=self.enable_downsample_var, command=lambda: self._toggle_downsample_settings(downsample_label, downsample_spin))
+        downsample_check.pack(side="left")
+        ttk.Label(downsample_check_frame, text="Downsample Audio").pack(side="left", padx=(2, 0))
+
+        downsample_label = ttk.Label(sr_frame, text="Target Sample Rate (Hz):")
+        downsample_label.grid(row=1, column=0, sticky="w", pady=5)
+        downsample_spin = ttk.Spinbox(sr_frame, from_=8000, to=44100, increment=2000, textvariable=self.downsample_sr_var, width=20)
+        downsample_spin.grid(row=1, column=1, padx=5, sticky="ew")
+        
+        # Initialize downsample settings state
+        self._toggle_downsample_settings(downsample_label, downsample_spin)
+
+        ttk.Separator(sr_frame, orient="horizontal").grid(row=2, column=0, columnspan=2, sticky="ew", pady=10)
+
+        pcen_check_frame = ttk.Frame(sr_frame)
+        pcen_check_frame.grid(row=3, column=0, columnspan=2, sticky="w", pady=5)
+        ttk.Checkbutton(pcen_check_frame, variable=self.use_pcen_var).pack(side="left")
+        ttk.Label(pcen_check_frame, text="Use PCEN Normalization").pack(side="left", padx=(2, 0))
+
+        ttk.Label(sr_frame, text="(PCEN: bioacoustics, Log: standard)", font=("TkDefaultFont", 8)).grid(row=4, column=0, columnspan=2, sticky="w", pady=0)
+
+        sr_frame.columnconfigure(1, weight=1)
+
+        # ===== CLOSE BUTTON =====
+        button_frame = ttk.Frame(scrollable_frame)
+        button_frame.pack(fill="x", padx=10, pady=15)
+        ttk.Button(button_frame, text="Close", command=settings_win.destroy).pack(fill="x")
+
+    def _toggle_filter_settings(self, low_label, low_entry, up_label, up_entry):
+        """Enable or disable filter settings based on checkbox state."""
+        state = "normal" if self.use_filter_var.get() else "disabled"
+        low_label.configure(state=state)
+        low_entry.configure(state=state)
+        up_label.configure(state=state)
+        up_entry.configure(state=state)
+
+    def _toggle_downsample_settings(self, label, spinbox):
+        """Enable or disable downsample settings based on checkbox state."""
+        state = "normal" if self.enable_downsample_var.get() else "disabled"
+        label.configure(state=state)
+        spinbox.configure(state=state)
 
     def refresh_devices(self):
         input_type = self.input_type_var.get()
@@ -895,7 +978,10 @@ class ModelsTesterApp:
                 up_cut=self.up_cut_var.get(),
                 sub_win_size_sec=self.sub_win_size_var.get(),
                 sub_hop_size_sec=self.sub_hop_size_var.get(),
-                use_filter=self.use_filter_var.get()
+                use_filter=self.use_filter_var.get(),
+                enable_downsample=self.enable_downsample_var.get(),
+                downsample_sr=self.downsample_sr_var.get(),
+                use_pcen=self.use_pcen_var.get()
             )
             
             # Save for plotting (Mel Spectrogram in dB)
