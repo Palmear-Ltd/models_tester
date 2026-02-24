@@ -927,11 +927,11 @@ class ModelsTesterApp:
             if predicted == 1:
                 self.positive_count += 1
                 self.pos_label.configure(text=str(self.positive_count))
-                res_str = f"POS ({score:.2f})"
+                res_str = f"POS ({score})"
             else:
                 self.negative_count += 1
                 self.neg_label.configure(text=str(self.negative_count))
-                res_str = f"NEG ({score:.2f})"
+                res_str = f"NEG ({score})"
                 
             self.log(f"Processed: {res_str}")
                 
