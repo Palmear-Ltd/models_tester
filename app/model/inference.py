@@ -121,11 +121,11 @@ class ModelInference:
         if output_data.shape[-1] == 1:
             # Single output (sigmoid)
             score = float(output_data[0][0])
-            predicted = 1 if score > threshold else 0
+            predicted = 1 if score >= threshold else 0
         else:
             # Multiple outputs (softmax) - take probability of class 1
             score = float(output_data[0][1])
-            predicted = 1 if score > threshold else 0
+            predicted = 1 if score >= threshold else 0
         
         return predicted, score
     

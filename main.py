@@ -42,7 +42,7 @@ class ModelsTesterApp:
         self.total_processed = 0
         
         # Preprocessing Config
-        self.use_filter_var = tk.BooleanVar(value=True)
+        self.use_filter_var = tk.BooleanVar(value=False)
         self.low_cut_var = tk.DoubleVar(value=500.0)
         self.up_cut_var = tk.DoubleVar(value=8000.0)
         self.sub_win_size_var = tk.DoubleVar(value=0.05)
@@ -73,7 +73,10 @@ class ModelsTesterApp:
         # Default paths
         self.default_base_dir = os.path.join(os.getcwd(), "models", "9_1_2")
         self.default_model_path = os.path.join(self.default_base_dir, "model.tflite")
-        self.default_scaler_path = os.path.join(self.default_base_dir, "scaler.npz")
+        # Prefer JSON if present; otherwise fallback to NPZ
+        json_path = os.path.join(self.default_base_dir, "scaler.json")
+        npz_path = os.path.join(self.default_base_dir, "scaler.npz")
+        self.default_scaler_path = json_path if os.path.exists(json_path) else npz_path
         self.default_output_dir = os.path.join(self.default_base_dir, "output")
         os.makedirs(self.default_output_dir, exist_ok=True)
 
@@ -158,7 +161,7 @@ class ModelsTesterApp:
         ttk.Button(config_frame, text="Browse", command=self.load_model_dialog).grid(row=0, column=2)
 
         # Scaler Path
-        ttk.Label(config_frame, text="Scaler Path (.npz):").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Label(config_frame, text="Scaler Path (.json/.npz):").grid(row=1, column=0, sticky="w", pady=5) 
         self.scaler_path_var = tk.StringVar(value=self.default_scaler_path)
         ttk.Entry(config_frame, textvariable=self.scaler_path_var).grid(row=1, column=1, padx=(2,2), sticky="ew")
         ttk.Button(config_frame, text="Browse", command=self.load_scaler_dialog).grid(row=1, column=2)
@@ -429,7 +432,13 @@ class ModelsTesterApp:
             self.model_path_var.set(path)
             
     def load_scaler_dialog(self):
-        path = filedialog.askopenfilename(filetypes=[("NPZ Files", "*.npz")])
+        path = filedialog.askopenfilename(
+            filetypes=[
+                ("Scaler Files", "*.json *.npz"),
+                ("JSON Files", "*.json"),
+                ("NPZ Files", "*.npz"),
+            ]
+        )
         if path:
             self.scaler_path_var.set(path)
             
@@ -918,11 +927,11 @@ class ModelsTesterApp:
             if predicted == 1:
                 self.positive_count += 1
                 self.pos_label.configure(text=str(self.positive_count))
-                res_str = f"POS ({score:.2f})"
+                res_str = f"POS ({score})"
             else:
                 self.negative_count += 1
                 self.neg_label.configure(text=str(self.negative_count))
-                res_str = f"NEG ({score:.2f})"
+                res_str = f"NEG ({score})"
                 
             self.log(f"Processed: {res_str}")
                 

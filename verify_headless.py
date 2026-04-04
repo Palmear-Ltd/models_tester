@@ -15,7 +15,9 @@ def verify_pipeline():
     
     # 1. Load Resources
     processor = AudioProcessor()
-    mean, var = processor.load_scaler("scaler.npz")
+    mean, var = processor.load_scaler("scaler.json")  # prefer
+    if mean is None:
+        mean, var = processor.load_scaler("scaler.npz")  # fallback    
     assert mean is not None, "Scaler load failed"
     
     interpreter = tflite.Interpreter(model_path="dummy_model.tflite")
