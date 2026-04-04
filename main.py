@@ -3,6 +3,7 @@ from tkinter import ttk, filedialog, messagebox
 import sounddevice as sd
 import soundfile as sf
 import numpy as np
+import librosa
 import threading
 import queue
 import time
@@ -15,11 +16,16 @@ import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
-from app.audio.processor import AudioProcessor
-from app.audio.features import FeatureExtractor
-from app.audio.scaler import Scaler
-from app.model.inference import ModelInference
-from app.ui.settings_dialog import SettingsDialog
+from inference_utils import AudioProcessor
+
+# Try to import TFLite Interpreter
+try:
+    import tflite_runtime.interpreter as tflite
+except ImportError:
+    try:
+        import tensorflow.lite as tflite
+    except ImportError:
+        tflite = None
 
 class ModelsTesterApp:
     def __init__(self, root):
@@ -29,9 +35,6 @@ class ModelsTesterApp:
         self.root.minsize(1200, 800)
         
         self.processor = AudioProcessor()
-        self.feature_extractor = FeatureExtractor()
-        self.scaler = Scaler()
-        self.model = ModelInference()
         self.is_running = False
         self.audio_thread = None
         self.audio_queue = queue.Queue()
@@ -42,18 +45,18 @@ class ModelsTesterApp:
         self.total_processed = 0
         
         # Preprocessing Config
-        self.use_filter_var = tk.BooleanVar(value=False)
+        self.use_filter_var = tk.BooleanVar(value=True)
         self.low_cut_var = tk.DoubleVar(value=500.0)
         self.up_cut_var = tk.DoubleVar(value=8000.0)
         self.sub_win_size_var = tk.DoubleVar(value=0.05)
         self.sub_hop_size_var = tk.DoubleVar(value=0.025)
         self.n_mels_var = tk.IntVar(value=32)
         self.seq_len_var = tk.IntVar(value=98)
-        self.duration_var = tk.DoubleVar(value=2.5)
-        self.time_limit_var = tk.IntVar(value=20)  # Recording time limit in seconds (minimum 20)
-        self.enable_downsample_var = tk.BooleanVar(value=False)
-        self.downsample_sr_var = tk.IntVar(value=22050)  # Target sample rate for downsampling
-        self.use_pcen_var = tk.BooleanVar(value=False)  # Use PCEN normalization instead of log (dB)
+        self.inference_mode_var = tk.StringVar(value="sliding")
+        self.single_shot_duration_sec = 20
+        self.collected_audio_chunks = []
+        self.final_audio_clip = None
+        self.single_shot_processed = False
         
         # History Data for Plots
         self.score_history = []
@@ -63,8 +66,6 @@ class ModelsTesterApp:
         self.start_time = 0
         self.raw_audio_snapshot = None # For waveform
         self.current_spectrogram = None # For heatmap
-        self.current_frequency_spectrum = None # For frequency diagram
-        self.frequency_bins = None # Frequency bins for x-axis
         
         # Scaler Data
         self.scaler_mean = None
@@ -73,10 +74,7 @@ class ModelsTesterApp:
         # Default paths
         self.default_base_dir = os.path.join(os.getcwd(), "models", "9_1_2")
         self.default_model_path = os.path.join(self.default_base_dir, "model.tflite")
-        # Prefer JSON if present; otherwise fallback to NPZ
-        json_path = os.path.join(self.default_base_dir, "scaler.json")
-        npz_path = os.path.join(self.default_base_dir, "scaler.npz")
-        self.default_scaler_path = json_path if os.path.exists(json_path) else npz_path
+        self.default_scaler_path = os.path.join(self.default_base_dir, "scaler.npz")
         self.default_output_dir = os.path.join(self.default_base_dir, "output")
         os.makedirs(self.default_output_dir, exist_ok=True)
 
@@ -86,9 +84,13 @@ class ModelsTesterApp:
         self.user_label_var = tk.StringVar(value="infested") # User expectation
         self.output_dir_var = tk.StringVar(value=self.default_output_dir)
         
-        # Audio output (monitoring)
-        self.enable_output_var = tk.BooleanVar(value=False)
-        self.output_device_var = tk.StringVar()
+        # Model
+        self.interpreter = None
+        self.input_details = None
+        self.output_details = None
+        self.model_seq_len = self.seq_len_var.get()
+        self.model_n_mels = self.n_mels_var.get()
+        self.is_one_shot_model = False
 
         self._setup_ui()
         
@@ -126,7 +128,7 @@ class ModelsTesterApp:
         self.root.configure(bg=base_bg)
 
         style.configure("TFrame", background=base_bg)
-        style.configure("TLabel", background=base_bg, foreground=text_color, font=("Helvetica", 11))
+        style.configure("TLabel", background=base_bg, foreground=text_color, font=("Helvetica", 10))
         style.configure("Header.TLabel", background=base_bg, foreground=text_color, font=("Helvetica", 12, "bold"))
         style.configure("Card.TLabelframe", background=base_bg, bordercolor=border_color, relief="solid")
         style.configure("Card.TLabelframe.Label", background=base_bg, foreground=text_color, font=("Helvetica", 11, "bold"))
@@ -151,32 +153,33 @@ class ModelsTesterApp:
         config_frame = ttk.LabelFrame(left_frame, text="Configuration", padding=12, style="Card.TLabelframe")
         config_frame.pack(fill="x", padx=10, pady=5)
         # Allow entries to expand horizontally so browse buttons stay visible on narrower panes
-        config_frame.columnconfigure(0, minsize=150)  # Set minimum width for label column
         config_frame.columnconfigure(1, weight=1)
         
         # Model Path
         ttk.Label(config_frame, text="Model Path (.tflite):").grid(row=0, column=0, sticky="w")
         self.model_path_var = tk.StringVar(value=self.default_model_path)
-        ttk.Entry(config_frame, textvariable=self.model_path_var).grid(row=0, column=1, padx=(2,2), sticky="ew")
+        ttk.Entry(config_frame, textvariable=self.model_path_var).grid(row=0, column=1, padx=5, sticky="ew")
         ttk.Button(config_frame, text="Browse", command=self.load_model_dialog).grid(row=0, column=2)
 
         # Scaler Path
-        ttk.Label(config_frame, text="Scaler Path (.json/.npz):").grid(row=1, column=0, sticky="w", pady=5) 
+        ttk.Label(config_frame, text="Scaler Path (.npz):").grid(row=1, column=0, sticky="w", pady=5)
         self.scaler_path_var = tk.StringVar(value=self.default_scaler_path)
-        ttk.Entry(config_frame, textvariable=self.scaler_path_var).grid(row=1, column=1, padx=(2,2), sticky="ew")
+        ttk.Entry(config_frame, textvariable=self.scaler_path_var).grid(row=1, column=1, padx=5, sticky="ew")
         ttk.Button(config_frame, text="Browse", command=self.load_scaler_dialog).grid(row=1, column=2)
 
-        # Test Duration (microphone auto-stop)
-        ttk.Label(config_frame, text="Test Duration (sec):").grid(row=2, column=0, sticky="w", pady=5)
-        ttk.Spinbox(config_frame, from_=20, to=300, increment=5, textvariable=self.time_limit_var, width=10).grid(row=2, column=1, sticky="w", padx=(2,2))
-        ttk.Label(config_frame, text="Minimum 20 seconds", font=("Helvetica", 10)).grid(row=2, column=2, sticky="w")
+        # Duration (used for sliding-window mode)
+        self.duration_row = ttk.Frame(config_frame)
+        self.duration_row.grid(row=2, column=0, columnspan=3, sticky="w", pady=5)
+        ttk.Label(self.duration_row, text="Window Duration (sec):").pack(side="left")
+        self.duration_var = tk.DoubleVar(value=2.5)
+        ttk.Spinbox(self.duration_row, from_=0.5, to=10.0, increment=0.5, textvariable=self.duration_var, width=10).pack(side="left", padx=5)
 
         # Input Check
         ttk.Label(config_frame, text="Input Source:").grid(row=3, column=0, sticky="w", pady=5)
         self.input_type_var = tk.StringVar(value="mic")
 
         input_frame = ttk.Frame(config_frame)
-        input_frame.grid(row=3, column=1, sticky="w", padx=(2,2))
+        input_frame.grid(row=3, column=1, sticky="w", padx=5)
         ttk.Radiobutton(input_frame, text="Microphone", variable=self.input_type_var, value="mic", command=self.refresh_devices).pack(side="left", padx=5)
         ttk.Radiobutton(input_frame, text="Wav File", variable=self.input_type_var, value="file", command=self.refresh_devices).pack(side="left", padx=5)
 
@@ -186,29 +189,20 @@ class ModelsTesterApp:
         
         self.device_var = tk.StringVar()
         self.device_combo = ttk.Combobox(config_frame, textvariable=self.device_var)
-        self.device_combo.grid(row=4, column=1, padx=(2,2), sticky="ew")
+        self.device_combo.grid(row=4, column=1, padx=5, sticky="ew")
         
         self.file_btn = ttk.Button(config_frame, text="Browse", command=self.browse_wav_file)
-        self.refresh_btn = ttk.Button(config_frame, text="⟳", command=self.refresh_devices, width=3)
-        
-        # Audio Output (Monitor) - only for microphone (create widgets before refresh_devices)
-        self.output_check = ttk.Checkbutton(config_frame, text="Monitor Audio", variable=self.enable_output_var, command=self.toggle_output_device)
-        self.output_device_label = ttk.Label(config_frame, text="Output Device:")
-        self.output_device_combo = ttk.Combobox(config_frame, textvariable=self.output_device_var)
-        
-        # Save results (WAV + JSON) - create before refresh_devices
-        self.save_check = ttk.Checkbutton(config_frame, text="Save results and audio", variable=self.save_results_var, command=self.toggle_output_dir)
-        
-        # Output directory for saved audio (create widgets, will be shown/hidden)
-        self.output_dir_label = ttk.Label(config_frame, text="Results Path:")
-        self.output_dir_entry = ttk.Entry(config_frame, textvariable=self.output_dir_var)
-        self.output_dir_btn = ttk.Button(config_frame, text="Browse", command=self.browse_output_dir)
         
         self.refresh_devices()
 
-        # Limits Config (outside main configuration block)
-        limits_frame = ttk.LabelFrame(left_frame, text="Thresholds", padding=8, style="Card.TLabelframe")
-        limits_frame.pack(fill="x", padx=10, pady=5)
+        # Output directory for saved audio
+        ttk.Label(config_frame, text="Output Dir:").grid(row=5, column=0, sticky="w", pady=5)
+        ttk.Entry(config_frame, textvariable=self.output_dir_var).grid(row=5, column=1, padx=5, sticky="ew")
+        ttk.Button(config_frame, text="Browse", command=self.browse_output_dir).grid(row=5, column=2)
+
+        # Limits Config
+        limits_frame = ttk.LabelFrame(config_frame, text="Thresholds", padding=8, style="Card.TLabelframe")
+        limits_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=5)
 
         ttk.Label(limits_frame, text="Score Thresh:").pack(side="left", padx=2)
         self.score_thresh_var = tk.DoubleVar(value=0.5)
@@ -218,10 +212,29 @@ class ModelsTesterApp:
         self.susp_limit_var = tk.IntVar(value=17)
         ttk.Entry(limits_frame, textvariable=self.susp_limit_var, width=5).pack(side="left", padx=2)
 
-        ttk.Label(limits_frame, text="Infested >=").pack(side="left", padx=2)
+        ttk.Label(limits_frame, text="Infested >").pack(side="left", padx=2)
         self.inf_limit_var = tk.IntVar(value=27)
         ttk.Entry(limits_frame, textvariable=self.inf_limit_var, width=5).pack(side="left", padx=2)
+        
+        # User label (expected outcome)
+        ttk.Label(config_frame, text="User Label:").grid(row=7, column=0, sticky="w", pady=5)
+        label_frame = ttk.Frame(config_frame)
+        label_frame.grid(row=7, column=1, sticky="w", padx=5)
+        ttk.Radiobutton(label_frame, text="Infested", variable=self.user_label_var, value="infested").pack(side="left", padx=5)
+        ttk.Radiobutton(label_frame, text="Healthy", variable=self.user_label_var, value="healthy").pack(side="left", padx=5)
 
+        # Save results (WAV + JSON)
+        ttk.Checkbutton(config_frame, text="Save results and audio", variable=self.save_results_var).grid(row=8, column=0, columnspan=3, sticky="w", pady=5)
+
+        # Inference behavior selection
+        self.mode_row = ttk.Frame(config_frame)
+        self.mode_row.grid(row=9, column=0, columnspan=3, sticky="w", pady=5)
+        ttk.Label(self.mode_row, text="Inference Mode:").pack(side="left")
+        mode_frame = ttk.Frame(self.mode_row)
+        mode_frame.pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text="Sliding Window", variable=self.inference_mode_var, value="sliding").pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text=f"Single Shot ({self.single_shot_duration_sec}s)", variable=self.inference_mode_var, value="single").pack(side="left", padx=5)
+        
         # --- Dashboard Frame (Left) ---
         dash_frame = ttk.LabelFrame(left_frame, text="Dashboard", padding=12, style="Card.TLabelframe")
         dash_frame.pack(fill="x", padx=10, pady=5)
@@ -252,10 +265,8 @@ class ModelsTesterApp:
         energy_frame = ttk.Frame(dash_frame)
         energy_frame.pack(fill="x", pady=5)
         ttk.Label(energy_frame, text="Current Energy (RMS):").pack(side="left")
-        self.energy_bar = ttk.Progressbar(energy_frame, orient="horizontal", length=200, mode="determinate", maximum=100)
+        self.energy_bar = ttk.Progressbar(energy_frame, orient="horizontal", length=200, mode="determinate", maximum=1.0)
         self.energy_bar.pack(side="left", padx=10, fill="x", expand=True)
-        self.energy_value_label = ttk.Label(energy_frame, text="0.000")
-        self.energy_value_label.pack(side="left", padx=5)
         
         # --- Control Area (Left) ---
         ctrl_frame = ttk.Frame(left_frame, padding=10)
@@ -265,8 +276,21 @@ class ModelsTesterApp:
         self.start_btn.pack(pady=5)
 
         # Status Log
-        self.status_log = tk.Listbox(left_frame, height=15)
-        self.status_log.pack(fill="both", expand=True, padx=10, pady=5)
+        status_frame = ttk.Frame(left_frame)
+        status_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+        status_scrollbar = ttk.Scrollbar(status_frame, orient="vertical")
+        status_scrollbar.pack(side="right", fill="y")
+
+        self.status_log = tk.Text(
+            status_frame,
+            height=15,
+            wrap="word",
+            yscrollcommand=status_scrollbar.set,
+        )
+        self.status_log.pack(side="left", fill="both", expand=True)
+        self.status_log.configure(state="disabled")
+        status_scrollbar.configure(command=self.status_log.yview)
         
         # --- Plots Area (Right) ---
         # Scrollable container for individual interactive plots
@@ -304,7 +328,6 @@ class ModelsTesterApp:
             return ax, canvas
 
         self.ax_wave, self.canvas_wave = add_plot_section("Waveform")
-        self.ax_freq, self.canvas_freq = add_plot_section("Frequency Spectrum")
         self.ax_hist, self.canvas_hist = add_plot_section("Score Distribution")
         self.ax_spec, self.canvas_spec = add_plot_section("Mel Spectrogram")
         self.ax_energy, self.canvas_energy = add_plot_section("Energy Timeline")
@@ -322,105 +345,78 @@ class ModelsTesterApp:
         return False
         
     def open_prep_settings(self):
-        """Open the preprocessing settings dialog."""
-        config_vars = {
-            'duration_var': self.duration_var,
-            'seq_len_var': self.seq_len_var,
-            'n_mels_var': self.n_mels_var,
-            'sub_win_size_var': self.sub_win_size_var,
-            'sub_hop_size_var': self.sub_hop_size_var,
-            'use_filter_var': self.use_filter_var,
-            'low_cut_var': self.low_cut_var,
-            'up_cut_var': self.up_cut_var,
-            'enable_downsample_var': self.enable_downsample_var,
-            'downsample_sr_var': self.downsample_sr_var,
-            'use_pcen_var': self.use_pcen_var
-        }
-        dialog = SettingsDialog(self.root, config_vars)
-        dialog.show()
+        settings_win = tk.Toplevel(self.root)
+        settings_win.title("Preprocessing Pipeline Configuration")
+        settings_win.geometry("400x300")
+        settings_win.transient(self.root)
+        settings_win.grab_set()
+
+        frame = ttk.Frame(settings_win, padding=20)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Checkbutton(frame, text="Use Bandpass Filter", variable=self.use_filter_var).grid(row=0, column=0, columnspan=2, sticky="w", pady=5)
+
+        row = 1
+        if not self.is_one_shot_model:
+            ttk.Label(frame, text="Duration (sec):").grid(row=row, column=0, sticky="w", pady=5)
+            ttk.Spinbox(frame, from_=0.5, to=10.0, increment=0.5, textvariable=self.duration_var, width=15).grid(row=row, column=1, padx=5)
+            row += 1
+
+        ttk.Label(frame, text="Low Cut (Hz):").grid(row=row, column=0, sticky="w", pady=5)
+        ttk.Entry(frame, textvariable=self.low_cut_var, width=15).grid(row=row, column=1, padx=5)
+        row += 1
+
+        ttk.Label(frame, text="Up Cut (Hz):").grid(row=row, column=0, sticky="w", pady=5)
+        ttk.Entry(frame, textvariable=self.up_cut_var, width=15).grid(row=row, column=1, padx=5)
+        row += 1
+
+        ttk.Label(frame, text="FFT Win Size (s):").grid(row=row, column=0, sticky="w", pady=5)
+        ttk.Entry(frame, textvariable=self.sub_win_size_var, width=15).grid(row=row, column=1, padx=5)
+        row += 1
+
+        ttk.Label(frame, text="Hop Size (s):").grid(row=row, column=0, sticky="w", pady=5)
+        ttk.Entry(frame, textvariable=self.sub_hop_size_var, width=15).grid(row=row, column=1, padx=5)
+        row += 1
+
+        ttk.Label(frame, text="Mel Bands:").grid(row=row, column=0, sticky="w", pady=5)
+        ttk.Entry(frame, textvariable=self.n_mels_var, width=15).grid(row=row, column=1, padx=5)
+        row += 1
+
+        if not self.is_one_shot_model:
+            ttk.Label(frame, text="Seq Len (frames):").grid(row=row, column=0, sticky="w", pady=5)
+            ttk.Entry(frame, textvariable=self.seq_len_var, width=15).grid(row=row, column=1, padx=5)
+            row += 1
+
+        ttk.Button(frame, text="Close", command=settings_win.destroy).grid(row=row, column=0, columnspan=2, pady=20)
+
+    def _update_model_specific_ui(self):
+        if getattr(self, "is_one_shot_model", False):
+            self.inference_mode_var.set("single")
+            self.duration_row.grid_remove()
+            self.mode_row.grid_remove()
+        else:
+            self.inference_mode_var.set("sliding")
+            self.duration_row.grid()
+            self.mode_row.grid()
 
     def refresh_devices(self):
         input_type = self.input_type_var.get()
         if input_type == 'mic':
             self.file_btn.grid_remove()
-            self.device_combo.grid(row=4, column=1, padx=(2,2), sticky="ew")
-            self.refresh_btn.grid(row=4, column=2, padx=2)
-            self.device_label.configure(text="Device:")
-            
-            # Show monitor controls for microphone
-            self.output_check.grid(row=6, column=0, columnspan=2, sticky="w", pady=5)
-            
+            self.device_combo.grid(row=4, column=1, padx=5, sticky="w")
             try:
                 devices = sd.query_devices()
                 input_devices = [f"{i}: {d['name']}" for i, d in enumerate(devices) if d['max_input_channels'] > 0]
                 self.device_combo['values'] = input_devices
                 if input_devices:
                     self.device_combo.current(0)
-                
-                # Populate output devices
-                output_devices = [f"{i}: {d['name']}" for i, d in enumerate(devices) if d['max_output_channels'] > 0]
-                self.output_device_combo['values'] = output_devices
-                if output_devices:
-                    self.output_device_combo.current(0)
-                
-                self.log("Audio devices refreshed")
             except Exception as e:
                 self.log(f"Error listing devices: {e}")
-            
-            # Show monitor checkbox for microphone mode
-            self.output_check.grid(row=6, column=0, columnspan=2, sticky="w", pady=5)
-            
-            # Show/hide output device selector and position save controls
-            self.toggle_output_device()
         else:
-            self.device_combo.grid(row=4, column=1, padx=(2,2), sticky="ew")
-            self.refresh_btn.grid_remove()
+            self.device_combo.grid_remove()
             self.file_btn.grid(row=4, column=2)
             self.device_label.configure(text="Wav File:")
-            
-            # Hide monitor controls for file mode
-            self.output_check.grid_remove()
-            self.output_device_label.grid_remove()
-            self.output_device_combo.grid_remove()
-            self.save_check.grid_remove()
-            self.output_dir_label.grid_remove()
-            self.output_dir_entry.grid_remove()
-            self.output_dir_btn.grid_remove()
-            # reuse combo as entry for file path display
-    
-    def toggle_output_device(self):
-        """Show or hide output device selector based on Monitor Audio checkbox"""
-        if self.enable_output_var.get():
-            self.output_device_label.grid(row=7, column=0, sticky="w", pady=5)
-            self.output_device_combo.grid(row=7, column=1, padx=(2,2), sticky="ew")
-            # Save checkbox moves to row 8
-            self.save_check.grid(row=8, column=0, columnspan=3, sticky="w", pady=5)
-        else:
-            self.output_device_label.grid_remove()
-            self.output_device_combo.grid_remove()
-            # Save checkbox moves to row 7 (no output device showing, monitor checkbox is at row 6)
-            self.save_check.grid(row=7, column=0, columnspan=3, sticky="w", pady=5)
-        
-        # Update output dir visibility
-        self.toggle_output_dir()
-    
-    def toggle_output_dir(self):
-        """Show or hide output directory based on Save checkbox"""
-        if self.save_results_var.get():
-            # Position depends on whether monitor audio is enabled
-            if self.enable_output_var.get():
-                # After save checkbox at row 8, so output dir at row 9
-                row = 9
-            else:
-                # After save checkbox at row 7, so output dir at row 8
-                row = 8
-            self.output_dir_label.grid(row=row, column=0, sticky="w", pady=5)
-            self.output_dir_entry.grid(row=row, column=1, padx=(2,2), sticky="ew")
-            self.output_dir_btn.grid(row=row, column=2)
-        else:
-            self.output_dir_label.grid_remove()
-            self.output_dir_entry.grid_remove()
-            self.output_dir_btn.grid_remove()
+            self.device_combo.grid(row=4, column=1, padx=5, sticky="w") # reuse combo as entry for file
             
     def display_file_entry(self):
         # Helper to swtich UI for file mode
@@ -432,13 +428,7 @@ class ModelsTesterApp:
             self.model_path_var.set(path)
             
     def load_scaler_dialog(self):
-        path = filedialog.askopenfilename(
-            filetypes=[
-                ("Scaler Files", "*.json *.npz"),
-                ("JSON Files", "*.json"),
-                ("NPZ Files", "*.npz"),
-            ]
-        )
+        path = filedialog.askopenfilename(filetypes=[("NPZ Files", "*.npz")])
         if path:
             self.scaler_path_var.set(path)
             
@@ -453,9 +443,10 @@ class ModelsTesterApp:
             self.output_dir_var.set(path)
             
     def log(self, message):
-        if hasattr(self, 'status_log'):
-            self.status_log.insert(tk.END, message)
-            self.status_log.see(tk.END)
+        self.status_log.configure(state="normal")
+        self.status_log.insert(tk.END, message + "\n")
+        self.status_log.see(tk.END)
+        self.status_log.configure(state="disabled")
         
     def load_resources(self):
         # Load Model
@@ -464,15 +455,29 @@ class ModelsTesterApp:
             messagebox.showerror("Error", "Model file not found!")
             return False
             
-        if not ModelInference.is_tflite_available():
+        if tflite is None:
             messagebox.showerror("Error", "TFLite runtime not installed!")
             return False
             
         try:
-            self.model.load_model(model_path)
+            self.interpreter = tflite.Interpreter(model_path=model_path)
+            self.interpreter.allocate_tensors()
+            self.input_details = self.interpreter.get_input_details()
+            self.output_details = self.interpreter.get_output_details()
+            input_shape = self.input_details[0].get("shape", [])
+            if len(input_shape) >= 4:
+                self.model_seq_len = int(input_shape[1])
+                self.model_n_mels = int(input_shape[2])
+                self.seq_len_var.set(self.model_seq_len)
+                self.n_mels_var.set(self.model_n_mels)
+                self.is_one_shot_model = self.model_seq_len >= 784 or "one_shot" in model_path.lower()
+            else:
+                self.is_one_shot_model = False
             self.log(f"Loaded Model: {os.path.basename(model_path)}")
+            self.log(f"Model input shape: {tuple(input_shape)}")
+            self._update_model_specific_ui()
         except Exception as e:
-            messagebox.showerror("Error", str(e))
+            messagebox.showerror("Error", f"Failed to load model: {e}")
             return False
             
         # Load Scaler
@@ -481,7 +486,7 @@ class ModelsTesterApp:
             messagebox.showerror("Error", "Scaler file not found!")
             return False
             
-        self.scaler_mean, self.scaler_var = self.scaler.load(scaler_path)
+        self.scaler_mean, self.scaler_var = self.processor.load_scaler(scaler_path)
         if self.scaler_mean is None:
             messagebox.showerror("Error", "Failed to load scaler data.")
             return False
@@ -509,7 +514,10 @@ class ModelsTesterApp:
         self.trigger_history = []
         self.energy_history = []
         self.start_time = time.time()
-        self.recording_start_time = time.time()  # Track when recording started
+        self.session_buffer = np.zeros(int(44100 * self.duration_var.get()), dtype=np.float32)
+        self.collected_audio_chunks = []
+        self.final_audio_clip = None
+        self.single_shot_processed = False
         
         self.start_btn.configure(text="STOP TEST")
         self.audio_queue = queue.Queue()
@@ -530,78 +538,45 @@ class ModelsTesterApp:
         self.is_running = False
         if self.audio_thread:
             self.audio_thread.join(timeout=1.0)
-        
-        # Wait a bit for any final callbacks to complete
-        time.sleep(0.2)
-        
-        # Process any remaining chunks in the queue
-        remaining_count = 0
+
+        # Drain any pending chunks before evaluating final result.
         try:
             while True:
                 item = self.audio_queue.get_nowait()
                 if isinstance(item, tuple) and item[0] == "ERROR":
                     self.log(f"Error: {item[1]}")
                     break
-                # Process remaining audio chunks
                 self.handle_audio_chunk(item)
-                remaining_count += 1
         except queue.Empty:
             pass
-        
-        if remaining_count > 0:
-            self.log(f"Processed {remaining_count} remaining chunks")
-        
+
+        # For single-shot mode, run exactly one inference on the full clip.
+        if self.inference_mode_var.get() == "single" and not self.single_shot_processed:
+            self.run_single_shot_inference()
+
         self.start_btn.configure(text="START TEST")
         predicted_infested = self.calculate_diagnosis()
 
         audio_path = None
         if self.save_results_var.get():
-            # Ask user for label before saving
-            user_label = self.ask_user_label()
-            if user_label:  # Only save if user didn't cancel
-                self.user_label_var.set(user_label)  # Set the label for use in file naming
-                if self.input_type_var.get() == "mic":
-                    audio_path = self.save_audio_snapshot(predicted_infested)
-                self.save_results(predicted_infested, audio_path)
-            else:
-                self.log("Save cancelled; results not written")
+            if self.input_type_var.get() == "mic":
+                audio_path = self.save_audio_snapshot(predicted_infested)
+            self.save_results(predicted_infested, audio_path)
         self.log("Test Stopped.")
-    
-    def ask_user_label(self):
-        """Show dialog to ask user for label before saving"""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Save Results")
-        dialog.geometry("350x150")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        
-        # Center the dialog
-        dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
-        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
-        dialog.geometry(f"+{x}+{y}")
-        
-        result = {"label": None}
-        
-        ttk.Label(dialog, text="What is the expected label for this sample?", font=("Helvetica", 11)).pack(pady=15)
-        
-        button_frame = ttk.Frame(dialog)
-        button_frame.pack(pady=10)
-        
-        def select_label(label):
-            result["label"] = label
-            dialog.destroy()
-        
-        ttk.Button(button_frame, text="Infested", command=lambda: select_label("infested"), width=12).pack(side="left", padx=5)
-        ttk.Button(button_frame, text="Healthy", command=lambda: select_label("healthy"), width=12).pack(side="left", padx=5)
-        ttk.Button(button_frame, text="Unknown", command=lambda: select_label("unknown"), width=12).pack(side="left", padx=5)
-        
-        ttk.Button(dialog, text="Cancel", command=dialog.destroy).pack(pady=5)
-        
-        self.root.wait_window(dialog)
-        return result["label"]
         
     def calculate_diagnosis(self):
+        if self.inference_mode_var.get() == "single":
+            if not self.trigger_history:
+                self.diag_label.configure(text="NO RESULT", foreground="gray")
+                return False
+            predicted = self.trigger_history[-1][1]
+            score = self.score_history[-1] if self.score_history else 0.0
+            if predicted == 1:
+                self.diag_label.configure(text=f"INFESTED (Score: {score:.2f})", foreground="red")
+                return True
+            self.diag_label.configure(text=f"HEALTHY (Score: {score:.2f})", foreground="green")
+            return False
+
         pos = self.positive_count
         susp_limit = self.susp_limit_var.get()
         inf_limit = self.inf_limit_var.get()
@@ -609,7 +584,7 @@ class ModelsTesterApp:
         
         if pos < susp_limit:
             self.diag_label.configure(text=f"HEALTHY (Pos: {pos})", foreground="green")
-        elif pos < inf_limit:
+        elif pos <= inf_limit:
             self.diag_label.configure(text=f"SUSPICIOUS (Pos: {pos})", foreground="orange")
         else:
             self.diag_label.configure(text=f"INFESTED (Pos: {pos})", foreground="red")
@@ -617,95 +592,30 @@ class ModelsTesterApp:
         return predicted_infested
 
     def mic_loop(self, device_idx):
-        time_limit = self.time_limit_var.get()
-        if time_limit > 0:
-            self.log(f"Starting Mic Stream on Device {device_idx} (Time Limit: {time_limit}s)...")
-            # Calculate expected number of chunks (0.5s per chunk)
-            expected_chunks = int(time_limit / 0.5)
-            self.log(f"Expected chunks: {expected_chunks}")
-        else:
-            self.log(f"Starting Mic Stream on Device {device_idx} (No Time Limit)...")
-            expected_chunks = 0
+        self.log(f"Starting Mic Stream on Device {device_idx}...")
         
         sample_rate = 44100
-        buffer_duration = self.duration_var.get()
-        buffer_len = int(sample_rate * buffer_duration)
-        
-        # Initialize buffer with zeros
-        audio_buffer = np.zeros(buffer_len, dtype=np.float32)
         
         block_size = int(sample_rate * 0.5) # 0.5 sec blocks
-        
-        # Chunk counter
-        chunk_count = [0]  # Use list to allow modification in callback
-        
-        # Monitoring buffer for output (store latest block)
-        monitor_buffer = {
-            "data": np.zeros((block_size, 1), dtype=np.float32)
-        }
-        
-        # Prepare output device if monitoring is enabled
-        output_device_idx = None
-        if self.enable_output_var.get():
-            try:
-                output_device_idx = int(self.output_device_var.get().split(":")[0])
-                self.log(f"Audio monitoring enabled on device {output_device_idx}")
-            except:
-                self.log("Warning: Could not parse output device, monitoring disabled")
+
+        max_chunks = None
+        if self.inference_mode_var.get() == "single":
+            max_chunks = int(self.single_shot_duration_sec / 0.5)
+            self.log(f"Single-shot mode: capturing {self.single_shot_duration_sec}s")
+        chunk_count = [0]
         
         def callback(indata, frames, time, status):
-            chunk_count[0] += 1
             self.audio_queue.put(indata.copy())
-            # Update monitor buffer with latest block
-            monitor_buffer["data"] = indata.copy()
+            chunk_count[0] += 1
             
         try:
-            if output_device_idx is not None:
-                # Single output stream with callback fed from latest monitored buffer
-                def output_callback(outdata, frames, time, status):
-                    buf = monitor_buffer.get("data")
-                    if buf is None or buf.size == 0:
-                        outdata.fill(0)
-                        return
-                    # Ensure shape match and pad/trim as needed
-                    if buf.shape[0] < frames:
-                        padded = np.zeros((frames, 1), dtype=np.float32)
-                        padded[:buf.shape[0], :] = buf
-                        outdata[:] = padded
-                    else:
-                        outdata[:] = buf[:frames]
-
-                with sd.InputStream(
-                    device=device_idx,
-                    channels=1,
-                    samplerate=sample_rate,
-                    blocksize=block_size,
-                    callback=callback,
-                ) as _input_stream, sd.OutputStream(
-                    device=output_device_idx,
-                    channels=1,
-                    samplerate=sample_rate,
-                    blocksize=block_size,
-                    callback=output_callback,
-                ) as _output_stream:
-                    while self.is_running:
-                        # Check chunk limit if set (0 means no limit)
-                        if expected_chunks > 0 and chunk_count[0] >= expected_chunks:
-                            self.log(f"Chunk limit reached ({chunk_count[0]} chunks). Stopping...")
-                            self.is_running = False
-                            break
-                        time.sleep(0.05)
-            else:
-                # No output, just input
-                with sd.InputStream(device=device_idx, channels=1, samplerate=sample_rate, 
-                                    blocksize=block_size, callback=callback):
-                    while self.is_running:
-                        # Check chunk limit if set (0 means no limit)
-                        if expected_chunks > 0 and chunk_count[0] >= expected_chunks:
-                            self.log(f"Chunk limit reached ({chunk_count[0]} chunks). Stopping...")
-                            self.is_running = False
-                            break
-                        time.sleep(0.05)
+            with sd.InputStream(device=device_idx, channels=1, samplerate=sample_rate, 
+                                blocksize=block_size, callback=callback):
+                while self.is_running:
+                    if max_chunks is not None and chunk_count[0] >= max_chunks:
+                        self.is_running = False
+                        break
+                    time.sleep(0.1)
         except Exception as e:
             self.audio_queue.put(("ERROR", str(e)))
             
@@ -727,6 +637,8 @@ class ModelsTesterApp:
                 
             block_size_samples = int(fs * 0.5)
             total_samples = len(data)
+            if self.inference_mode_var.get() == "single":
+                total_samples = min(total_samples, int(fs * self.single_shot_duration_sec))
             
             idx = 0
             while self.is_running and idx < total_samples:
@@ -783,9 +695,36 @@ class ModelsTesterApp:
         
         # Save snapshot for plotting
         self.raw_audio_snapshot = self.session_buffer.copy()
-        
-        # Run Inference
-        self.run_inference(self.session_buffer)
+
+        if self.inference_mode_var.get() == "single":
+            self.collected_audio_chunks.append(chunk_flat.copy())
+            # Keep energy timeline live while recording
+            rms = np.sqrt(np.mean(chunk_flat**2))
+            self.current_energy = rms
+            self.energy_bar["value"] = min(rms * 100, 100)
+            curr_time = time.time() - self.start_time
+            self.energy_history.append((curr_time, rms))
+        else:
+            # Sliding-window behavior
+            self.run_inference(self.session_buffer)
+
+    def run_single_shot_inference(self):
+        if not self.collected_audio_chunks:
+            self.log("Single-shot inference skipped: no audio captured")
+            self.single_shot_processed = True
+            return
+
+        full_audio = np.concatenate(self.collected_audio_chunks).astype(np.float32)
+        target_samples = int(44100 * self.single_shot_duration_sec)
+        if len(full_audio) < target_samples:
+            full_audio = np.pad(full_audio, (0, target_samples - len(full_audio)))
+        else:
+            full_audio = full_audio[:target_samples]
+
+        self.final_audio_clip = full_audio.copy()
+        self.raw_audio_snapshot = self.final_audio_clip.copy()
+        self.run_inference(self.final_audio_clip)
+        self.single_shot_processed = True
 
     def _derive_output_base(self, predicted_infested):
         user_choice = self.user_label_var.get()
@@ -793,12 +732,9 @@ class ModelsTesterApp:
         if user_choice == "infested":
             tag = "TP" if predicted_infested else "FN"
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        elif user_choice == "healthy":
+        else: # healthy
             tag = "TN" if not predicted_infested else "FP"
             timestamp = datetime.now().strftime("%Y%m%d_%I%M%p") if tag == "TN" else datetime.now().strftime("%Y%m%d_%H%M%S")
-        else:  # unknown
-            tag = "U"
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         out_dir = self.output_dir_var.get().strip() or "recordings"
         os.makedirs(out_dir, exist_ok=True)
@@ -806,12 +742,13 @@ class ModelsTesterApp:
         return base
 
     def save_audio_snapshot(self, predicted_positive):
-        if not hasattr(self, 'session_buffer'):
+        if not hasattr(self, 'session_buffer') and self.final_audio_clip is None:
             return None
         try:
             base = self._derive_output_base(predicted_positive)
             wav_path = f"{base}.wav"
-            sf.write(wav_path, self.session_buffer, 44100)
+            audio_to_save = self.final_audio_clip if self.inference_mode_var.get() == "single" and self.final_audio_clip is not None else self.session_buffer
+            sf.write(wav_path, audio_to_save, 44100)
             self.log(f"Saved audio: {os.path.basename(wav_path)}")
             return wav_path
         except Exception as e:
@@ -829,9 +766,6 @@ class ModelsTesterApp:
                 "scaler_path": self.scaler_path_var.get(),
                 "user_label": self.user_label_var.get(),
                 "predicted_infested": bool(predicted_infested),
-                    "positive_count": self.positive_count,
-                    "negative_count": self.negative_count,
-                    "total_processed": self.positive_count + self.negative_count,
                 "score_thresh": self.score_thresh_var.get(),
                 "susp_limit": self.susp_limit_var.get(),
                 "inf_limit": self.inf_limit_var.get(),
@@ -843,6 +777,7 @@ class ModelsTesterApp:
                 "sub_hop_size": self.sub_hop_size_var.get(),
                 "save_results_enabled": self.save_results_var.get(),
                 "input_type": self.input_type_var.get(),
+                "inference_mode": self.inference_mode_var.get(),
                 "score_history": [float(s) for s in self.score_history],
                 "trigger_history": [(float(t), int(v)) for t, v in self.trigger_history],
                 "energy_history": [(float(t), float(v)) for t, v in self.energy_history],
@@ -863,59 +798,50 @@ class ModelsTesterApp:
             # 0. Calculate Energy (RMS)
             rms = np.sqrt(np.mean(audio_data**2))
             self.current_energy = rms
-            scaled_rms = min(rms * 100, 100)
-            self.energy_bar["value"] = scaled_rms  # Progressbar scaled to 0-100
-            if hasattr(self, "energy_value_label"):
-                self.energy_value_label.config(text=f"{rms:.3f}")
+            self.energy_bar["value"] = min(rms * 100, 100) # Scaling for visibility, assuming max ~1.0
             
             # 1. Extract Features with Config
-            specs = self.feature_extractor.extract_features(
+            specs = self.processor.extract_features(
                 audio_data, 
                 sr=44100,
-                n_mels=self.n_mels_var.get(),
-                seq_len=self.seq_len_var.get(),
+                n_mels=self.model_n_mels,
+                seq_len=self.model_seq_len,
                 low_cut=self.low_cut_var.get(),
                 up_cut=self.up_cut_var.get(),
                 sub_win_size_sec=self.sub_win_size_var.get(),
                 sub_hop_size_sec=self.sub_hop_size_var.get(),
-                use_filter=self.use_filter_var.get(),
-                enable_downsample=self.enable_downsample_var.get(),
-                downsample_sr=self.downsample_sr_var.get(),
-                use_pcen=self.use_pcen_var.get()
+                use_filter=self.use_filter_var.get()
             )
             
             # Save for plotting (Mel Spectrogram in dB)
             self.current_spectrogram = specs.copy()
             
-            # Calculate Frequency Spectrum using FFT
-            fft_size = 4096
-            if len(audio_data) >= fft_size:
-                # Use the last fft_size samples
-                fft_data = audio_data[-fft_size:]
-                # Apply window to reduce spectral leakage
-                window = np.hanning(fft_size)
-                windowed_data = fft_data * window
-                # Compute FFT
-                fft_vals = np.fft.rfft(windowed_data)
-                fft_magnitude = np.abs(fft_vals)
-                # Convert to dB scale
-                fft_magnitude_db = 20 * np.log10(fft_magnitude + 1e-10)
-                # Create frequency bins (Hz)
-                self.frequency_bins = np.fft.rfftfreq(fft_size, 1/44100)
-                self.current_frequency_spectrum = fft_magnitude_db
-            
             # 2. Scale
-            specs_scaled = self.scaler.apply(specs, self.scaler_mean, self.scaler_var)
+            specs_scaled = self.processor.apply_scaler(specs, self.scaler_mean, self.scaler_var)
             
             # 3. Reshape for Model
             # Model Input: (1, seq_len, n_mels, 1)
-            seq_len = self.seq_len_var.get()
-            n_mels = self.n_mels_var.get()
+            seq_len = self.model_seq_len
+            n_mels = self.model_n_mels
             input_data = specs_scaled.reshape(1, seq_len, n_mels, 1).astype(np.float32)
             
-            # 4. Invoke Model
+            # 4. Invoke
+            self.interpreter.set_tensor(self.input_details[0]['index'], input_data)
+            self.interpreter.invoke()
+            output_data = self.interpreter.get_tensor(self.output_details[0]['index'])
+            
+            # 5. Logic
             score_thresh = self.score_thresh_var.get()
-            predicted, score = self.model.predict_with_score(input_data, threshold=score_thresh)
+            
+            predicted = 0
+            score = 0
+            if output_data.shape[-1] == 1:
+                score = output_data[0][0]
+                predicted = 1 if score > score_thresh else 0
+            else:
+                # Softmax - usually binary still, but if index 1 is positive
+                score = output_data[0][1] # P(Positive)
+                predicted = 1 if score > score_thresh else 0
 
             # Store stats for plot
             self.score_history.append(score)
@@ -927,11 +853,11 @@ class ModelsTesterApp:
             if predicted == 1:
                 self.positive_count += 1
                 self.pos_label.configure(text=str(self.positive_count))
-                res_str = f"POS ({score})"
+                res_str = f"POS ({score:.2f})"
             else:
                 self.negative_count += 1
                 self.neg_label.configure(text=str(self.negative_count))
-                res_str = f"NEG ({score})"
+                res_str = f"NEG ({score:.2f})"
                 
             self.log(f"Processed: {res_str}")
                 
@@ -951,22 +877,6 @@ class ModelsTesterApp:
                 self.ax_wave.set_ylim(-1, 1)
                 self.ax_wave.grid(True)
                 self.canvas_wave.draw()
-            
-            # Update Frequency Spectrum
-            if self.current_frequency_spectrum is not None and self.frequency_bins is not None:
-                self.ax_freq.clear()
-                # Plot frequency spectrum, limit to 0-10kHz for better visualization
-                freq_limit = 10000  # Hz
-                freq_mask = self.frequency_bins <= freq_limit
-                self.ax_freq.plot(self.frequency_bins[freq_mask], 
-                                 self.current_frequency_spectrum[freq_mask], 
-                                 'b-', linewidth=0.8)
-                self.ax_freq.set_title("Frequency Spectrum (FFT)")
-                self.ax_freq.set_xlabel("Frequency (Hz)")
-                self.ax_freq.set_ylabel("Magnitude (dB)")
-                self.ax_freq.set_xlim(0, freq_limit)
-                self.ax_freq.grid(True, alpha=0.3)
-                self.canvas_freq.draw()
             
             # Update Histogram (Score)
             if self.score_history:

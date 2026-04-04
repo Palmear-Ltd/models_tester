@@ -77,6 +77,8 @@ class FeatureExtractor:
         if y.shape[0] < window_length:
             raise ValueError(f"Segment too short: {y.shape[0]} < {window_length}")
 
+        pad_value = 0.0
+
         # ---- LOG PATH (Flutter/original parity) ----
         if not use_pcen:
             # 1) symmetric Hamming window (SciPy) NOT Hann
@@ -120,11 +122,13 @@ class FeatureExtractor:
                     min_val = np.percentile(positive, 5, interpolation="linear")
             else:
                 min_val = 1e-12            
+            silence_floor = float(10.0 * np.log10((min_val * 1e-3) + 1e-12))
             mel_spec = np.maximum(mel_spec, min_val * 1e-3)
             log_mel = 10.0 * np.log10(mel_spec + 1e-12)  # (n_mels+1, n_frames)
 
             # 8) transpose to [frames, mels], drop last mel band -> 32
             features = log_mel.T[:, :-1].astype(np.float32)  # (n_frames, 32)
+            pad_value = silence_floor
 
         # ---- PCEN PATH (kept; not implemented in Flutter) ----
         else:
@@ -164,12 +168,18 @@ class FeatureExtractor:
                 eps=1e-6,
             )
             features = mel_pcen.T.astype(np.float32)  # (n_frames, 32)
+            pad_value = 0.0
 
         # ---- 4) Pad/truncate to seq_len (98) ----
         if features.shape[0] > seq_len:
             features = features[:seq_len, :]
         elif features.shape[0] < seq_len:
             pad = seq_len - features.shape[0]
-            features = np.pad(features, ((0, pad), (0, 0)), mode="constant")
+            features = np.pad(
+                features,
+                ((0, pad), (0, 0)),
+                mode="constant",
+                constant_values=pad_value,
+            )
 
         return features
