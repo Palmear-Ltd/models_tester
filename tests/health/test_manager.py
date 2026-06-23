@@ -3,7 +3,7 @@ import pytest
 
 from app.health.checks.base import SignalHealthCheck
 from app.health.manager import SignalCheckManager
-from app.health.models import AudioWindow, CheckStatus, SignalCheckResult
+from app.health.models import AudioWindow, CheckCategory, CheckStatus, SignalCheckResult
 
 
 def _window():
@@ -76,3 +76,24 @@ def test_checks_property_returns_copy():
     checks = manager.checks
     checks.clear()
     assert len(manager.checks) == 1
+
+
+class _CategorizedCheck(SignalHealthCheck):
+    check_id = "T100"
+    check_name = "Categorized"
+    category = CheckCategory.CRITICAL
+
+    def run(self, window, features):
+        return SignalCheckResult(check_id=self.check_id, check_name=self.check_name)
+
+
+def test_manager_stamps_category_on_success():
+    manager = SignalCheckManager()
+    manager.register(_CategorizedCheck())
+    results = manager.run_checks(_window(), {})
+    assert results[0].category is CheckCategory.CRITICAL
+
+
+def test_default_check_category_is_primary():
+    # A check that does not override `category` defaults to PRIMARY.
+    assert _PassingCheck().category is CheckCategory.PRIMARY

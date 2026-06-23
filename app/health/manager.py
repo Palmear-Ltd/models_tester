@@ -36,12 +36,14 @@ class SignalCheckManager:
             try:
                 result = check.run(window, features)
                 result.executed = True
+                result.category = check.category
             except Exception as exc:  # isolate one check's failure from the rest
                 result = SignalCheckResult(
                     check_id=getattr(check, "check_id", "") or check.__class__.__name__,
                     check_name=getattr(check, "check_name", "")
                     or check.__class__.__name__,
                     status=CheckStatus.NOT_EXECUTED,
+                    category=check.category,
                     executed=False,
                     diagnostic_messages=[f"Check raised: {exc}"],
                 )

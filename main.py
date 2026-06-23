@@ -17,7 +17,7 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 from inference_utils import AudioProcessor
-from app.health.pipeline import HealthAnalysisPipeline
+from app.health.defaults import default_pipeline
 from app.health.models import AudioWindow, HealthState
 
 # Try to import TFLite Interpreter
@@ -37,8 +37,9 @@ class ModelsTesterApp:
         self.root.minsize(1200, 800)
         
         self.processor = AudioProcessor()
-        self.health_pipeline = HealthAnalysisPipeline()
+        self.health_pipeline = default_pipeline()
         self.latest_health_report = None
+        self._last_health_state = None
         self.is_running = False
         self.audio_thread = None
         self.audio_queue = queue.Queue()
@@ -706,6 +707,10 @@ class ModelsTesterApp:
             text=f"Signal Health: {state.value}",
             foreground=colors.get(state, "gray"),
         )
+        # Log only on transitions to avoid flooding the log every 0.5s.
+        if state != self._last_health_state:
+            self._last_health_state = state
+            self.log(f"Signal health {state.value}: {report.diagnostic_summary}")
 
     def handle_audio_chunk(self, chunk):
         # We need a persistent buffer for the session

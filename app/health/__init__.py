@@ -1,6 +1,7 @@
 """Audio Signal Health Monitoring subsystem (NumPy-only, UI-agnostic)."""
 from app.health.models import (
     AudioWindow,
+    CheckCategory,
     CheckStatus,
     HealthReport,
     HealthState,
@@ -10,6 +11,7 @@ from app.health.models import (
 
 __all__ = [
     "AudioWindow",
+    "CheckCategory",
     "CheckStatus",
     "HealthReport",
     "HealthState",

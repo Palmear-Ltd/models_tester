@@ -27,6 +27,14 @@ class CheckStatus(Enum):
     NOT_EXECUTED = "NOT_EXECUTED"
 
 
+class CheckCategory(Enum):
+    """Importance of a check for Decision Fusion (spec Ch. 10.3)."""
+
+    CRITICAL = "CRITICAL"
+    PRIMARY = "PRIMARY"
+    SUPPORTING = "SUPPORTING"
+
+
 @dataclass(frozen=True)
 class Measurement:
     """A single numerical value produced by a Signal Health Check."""
@@ -82,6 +90,7 @@ class SignalCheckResult:
     check_id: str
     check_name: str
     status: CheckStatus = CheckStatus.NOT_EXECUTED
+    category: CheckCategory = CheckCategory.PRIMARY
     executed: bool = False
     execution_time: float = 0.0
     measurements: list[Measurement] = field(default_factory=list)
