@@ -6,21 +6,32 @@ for model input normalization.
 """
 
 import json
+import logging
 import os
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class Scaler:
     """
     Handles scaler operations for feature normalization.
-    
+
     Loads and applies StandardScaler transformations (mean and variance)
     to normalize features before feeding them to the model.
     """
-    
+
     def __init__(self):
         self.mean = None
         self.var = None
+        # Reason the most recent load() returned (None, None); None on success.
+        self.last_error = None
+
+    def _fail(self, reason: str):
+        """Record why a load failed (logged + retained), return (None, None)."""
+        self.last_error = reason
+        logger.warning("Scaler load failed: %s", reason)
+        return None, None
     
     def load(self, path: str):
         """
@@ -37,6 +48,7 @@ class Scaler:
         Returns:
             Tuple of (mean, var) or (None, None) if loading fails
         """
+        self.last_error = None
         try:
             ext = os.path.splitext(path)[1].lower()
 
@@ -50,7 +62,7 @@ class Scaler:
                 scale = obj.get("scale_", obj.get("scale", None))
 
                 if mean is None:
-                    return None, None
+                    return self._fail(f"{path}: JSON missing 'mean'/'mean_'")
 
                 mean = np.asarray(mean, dtype=np.float32)
 
@@ -61,7 +73,7 @@ class Scaler:
                     scale = np.asarray(scale, dtype=np.float32)
                     var = scale * scale
                 else:
-                    return None, None
+                    return self._fail(f"{path}: JSON missing 'var'/'scale'")
 
                 self.mean = mean
                 self.var = var
@@ -69,14 +81,28 @@ class Scaler:
 
             # -------- NPZ (fallback / default) --------
             data = np.load(path)
-            mean = data["mean_"] if "mean_" in data else data["mean"]
-            var = data["var_"] if "var_" in data else data["var"]
+            if "mean_" in data:
+                mean = data["mean_"]
+            elif "mean" in data:
+                mean = data["mean"]
+            else:
+                return self._fail(
+                    f"{path}: .npz missing 'mean'/'mean_' (keys: {list(data.keys())})"
+                )
+            if "var_" in data:
+                var = data["var_"]
+            elif "var" in data:
+                var = data["var"]
+            else:
+                return self._fail(
+                    f"{path}: .npz missing 'var'/'var_' (keys: {list(data.keys())})"
+                )
 
             self.mean = np.asarray(mean, dtype=np.float32)
             self.var = np.asarray(var, dtype=np.float32)
             return self.mean, self.var
-        except Exception:
-            return None, None
+        except Exception as e:
+            return self._fail(f"{path}: {type(e).__name__}: {e}")
     
     def apply(self, features, mean=None, var=None):
         """

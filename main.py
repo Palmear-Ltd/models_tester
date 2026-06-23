@@ -17,6 +17,8 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 from inference_utils import AudioProcessor
+from app.health.pipeline import HealthAnalysisPipeline
+from app.health.models import AudioWindow, HealthState
 
 # Try to import TFLite Interpreter
 try:
@@ -35,6 +37,8 @@ class ModelsTesterApp:
         self.root.minsize(1200, 800)
         
         self.processor = AudioProcessor()
+        self.health_pipeline = HealthAnalysisPipeline()
+        self.latest_health_report = None
         self.is_running = False
         self.audio_thread = None
         self.audio_queue = queue.Queue()
@@ -74,7 +78,7 @@ class ModelsTesterApp:
         # Default paths
         self.default_base_dir = os.path.join(os.getcwd(), "models", "9_1_2")
         self.default_model_path = os.path.join(self.default_base_dir, "model.tflite")
-        self.default_scaler_path = os.path.join(self.default_base_dir, "scaler.npz")
+        self.default_scaler_path = os.path.join(self.default_base_dir, "scaler.json")
         self.default_output_dir = os.path.join(self.default_base_dir, "output")
         os.makedirs(self.default_output_dir, exist_ok=True)
 
@@ -162,7 +166,7 @@ class ModelsTesterApp:
         ttk.Button(config_frame, text="Browse", command=self.load_model_dialog).grid(row=0, column=2)
 
         # Scaler Path
-        ttk.Label(config_frame, text="Scaler Path (.npz):").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Label(config_frame, text="Scaler Path (.json/.npz):").grid(row=1, column=0, sticky="w", pady=5)
         self.scaler_path_var = tk.StringVar(value=self.default_scaler_path)
         ttk.Entry(config_frame, textvariable=self.scaler_path_var).grid(row=1, column=1, padx=5, sticky="ew")
         ttk.Button(config_frame, text="Browse", command=self.load_scaler_dialog).grid(row=1, column=2)
@@ -260,6 +264,15 @@ class ModelsTesterApp:
         # Diagnosis
         self.diag_label = ttk.Label(dash_frame, text="No Result Yet", font=("Helvetica", 16, "bold"), foreground="gray")
         self.diag_label.pack(pady=10)
+
+        # Signal Health Indicator (Audio Signal Health Monitoring subsystem)
+        self.health_label = ttk.Label(
+            dash_frame,
+            text="Signal Health: UNKNOWN",
+            font=("Helvetica", 12, "bold"),
+            foreground="gray",
+        )
+        self.health_label.pack(pady=4)
 
         # Energy Indicator
         energy_frame = ttk.Frame(dash_frame)
@@ -488,7 +501,8 @@ class ModelsTesterApp:
             
         self.scaler_mean, self.scaler_var = self.processor.load_scaler(scaler_path)
         if self.scaler_mean is None:
-            messagebox.showerror("Error", "Failed to load scaler data.")
+            reason = self.processor.last_scaler_error or "unknown error"
+            messagebox.showerror("Error", f"Failed to load scaler data:\n{reason}")
             return False
         self.log(f"Loaded Scaler: {os.path.basename(scaler_path)}")
         
@@ -680,6 +694,19 @@ class ModelsTesterApp:
             
         self.root.after(100, self.process_queue)
         
+    def _update_health_indicator(self, report):
+        colors = {
+            HealthState.OK: "green",
+            HealthState.WARNING: "orange",
+            HealthState.FAULT: "red",
+            HealthState.UNKNOWN: "gray",
+        }
+        state = report.final_state
+        self.health_label.configure(
+            text=f"Signal Health: {state.value}",
+            foreground=colors.get(state, "gray"),
+        )
+
     def handle_audio_chunk(self, chunk):
         # We need a persistent buffer for the session
         if not hasattr(self, 'session_buffer'):
@@ -695,6 +722,14 @@ class ModelsTesterApp:
         
         # Save snapshot for plotting
         self.raw_audio_snapshot = self.session_buffer.copy()
+
+        # Audio signal health monitoring — additive; never blocks or alters inference.
+        try:
+            window = AudioWindow(samples=self.session_buffer, sample_rate=44100)
+            self.latest_health_report = self.health_pipeline.analyze(window)
+            self._update_health_indicator(self.latest_health_report)
+        except Exception as e:
+            self.log(f"Health monitoring error: {e}")
 
         if self.inference_mode_var.get() == "single":
             self.collected_audio_chunks.append(chunk_flat.copy())
