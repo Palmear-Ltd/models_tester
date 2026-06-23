@@ -1,0 +1,8 @@
+{
+    "detectionWinSize": 20.0,
+    "energyThr": 10.0,
+    "sumInfThr": 22.0,
+    "sumSusThr": 20.0,
+    "labelScore": 0.45,
+    "susIndicator": true
+}
