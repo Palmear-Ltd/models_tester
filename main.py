@@ -14,12 +14,13 @@ import platform
 from datetime import datetime
 import matplotlib
 matplotlib.use("TkAgg")
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from inference_utils import AudioProcessor
 from app.health.config import PROFILES, pipeline_for_profile
 from app.health.models import AudioWindow, HealthState
 from app.health.reporting import report_rows
+from app.ui import SettingsDialog
 
 SAMPLE_RATE = 44100  # acquisition sample rate (Hz); the whole pipeline runs at this rate
 
@@ -92,6 +93,9 @@ class ModelsTesterApp:
         self.save_audio_var = self.save_results_var
         self.user_label_var = tk.StringVar(value="infested") # User expectation
         self.output_dir_var = tk.StringVar(value=self.default_output_dir)
+        self.model_path_var = tk.StringVar(value=self.default_model_path)
+        self.scaler_path_var = tk.StringVar(value=self.default_scaler_path)
+        self.duration_var = tk.DoubleVar(value=2.5)
         
         # Model
         self.interpreter = None
@@ -158,91 +162,44 @@ class ModelsTesterApp:
         self.root.update_idletasks()
         main_pane.sashpos(0, 520)
         
-        # --- Configuration Frame (Left) ---
-        config_frame = ttk.LabelFrame(left_frame, text="Configuration", padding=12, style="Card.TLabelframe")
-        config_frame.pack(fill="x", padx=10, pady=5)
-        # Allow entries to expand horizontally so browse buttons stay visible on narrower panes
-        config_frame.columnconfigure(1, weight=1)
-        
-        # Model Path
-        ttk.Label(config_frame, text="Model Path (.tflite):").grid(row=0, column=0, sticky="w")
-        self.model_path_var = tk.StringVar(value=self.default_model_path)
-        ttk.Entry(config_frame, textvariable=self.model_path_var).grid(row=0, column=1, padx=5, sticky="ew")
-        ttk.Button(config_frame, text="Browse", command=self.load_model_dialog).grid(row=0, column=2)
+        # --- Run Bar (Left): input source + device/file + controls ---
+        run_frame = ttk.LabelFrame(left_frame, text="Run", padding=12, style="Card.TLabelframe")
+        run_frame.pack(fill="x", padx=10, pady=5)
+        run_frame.columnconfigure(1, weight=1)
 
-        # Scaler Path
-        ttk.Label(config_frame, text="Scaler Path (.json/.npz):").grid(row=1, column=0, sticky="w", pady=5)
-        self.scaler_path_var = tk.StringVar(value=self.default_scaler_path)
-        ttk.Entry(config_frame, textvariable=self.scaler_path_var).grid(row=1, column=1, padx=5, sticky="ew")
-        ttk.Button(config_frame, text="Browse", command=self.load_scaler_dialog).grid(row=1, column=2)
-
-        # Duration (used for sliding-window mode)
-        self.duration_row = ttk.Frame(config_frame)
-        self.duration_row.grid(row=2, column=0, columnspan=3, sticky="w", pady=5)
-        ttk.Label(self.duration_row, text="Window Duration (sec):").pack(side="left")
-        self.duration_var = tk.DoubleVar(value=2.5)
-        ttk.Spinbox(self.duration_row, from_=0.5, to=10.0, increment=0.5, textvariable=self.duration_var, width=10).pack(side="left", padx=5)
-
-        # Input Check
-        ttk.Label(config_frame, text="Input Source:").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Label(run_frame, text="Input Source:").grid(row=0, column=0, sticky="w", pady=5)
         self.input_type_var = tk.StringVar(value="mic")
-
-        input_frame = ttk.Frame(config_frame)
-        input_frame.grid(row=3, column=1, sticky="w", padx=5)
+        input_frame = ttk.Frame(run_frame)
+        input_frame.grid(row=0, column=1, columnspan=2, sticky="w", padx=5)
         ttk.Radiobutton(input_frame, text="Microphone", variable=self.input_type_var, value="mic", command=self.refresh_devices).pack(side="left", padx=5)
         ttk.Radiobutton(input_frame, text="Wav File", variable=self.input_type_var, value="file", command=self.refresh_devices).pack(side="left", padx=5)
 
-        # Audio Device / File Path (moved down)
-        self.device_label = ttk.Label(config_frame, text="Device:")
-        self.device_label.grid(row=4, column=0, sticky="w", pady=5)
-        
+        self.device_label = ttk.Label(run_frame, text="Device:")
+        self.device_label.grid(row=1, column=0, sticky="w", pady=5)
         self.device_var = tk.StringVar()
-        self.device_combo = ttk.Combobox(config_frame, textvariable=self.device_var)
-        self.device_combo.grid(row=4, column=1, padx=5, sticky="ew")
-        
-        self.file_btn = ttk.Button(config_frame, text="Browse", command=self.browse_wav_file)
-        
+        self.device_combo = ttk.Combobox(run_frame, textvariable=self.device_var)
+        self.device_combo.grid(row=1, column=1, padx=5, sticky="ew")
+        self.file_btn = ttk.Button(run_frame, text="Browse", command=self.browse_wav_file)
         self.refresh_devices()
 
-        # Output directory for saved audio
-        ttk.Label(config_frame, text="Output Dir:").grid(row=5, column=0, sticky="w", pady=5)
-        ttk.Entry(config_frame, textvariable=self.output_dir_var).grid(row=5, column=1, padx=5, sticky="ew")
-        ttk.Button(config_frame, text="Browse", command=self.browse_output_dir).grid(row=5, column=2)
+        controls_frame = ttk.Frame(run_frame)
+        controls_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        self.start_btn = ttk.Button(controls_frame, text="START TEST", command=self.toggle_test, width=18, style="Primary.TButton")
+        self.start_btn.pack(side="left")
+        ttk.Button(controls_frame, text="⚙ Settings", command=self.open_prep_settings).pack(side="left", padx=8)
 
-        # Limits Config
-        limits_frame = ttk.LabelFrame(config_frame, text="Thresholds", padding=8, style="Card.TLabelframe")
-        limits_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=5)
-
+        # --- Thresholds strip (Left) ---
+        limits_frame = ttk.LabelFrame(left_frame, text="Thresholds", padding=8, style="Card.TLabelframe")
+        limits_frame.pack(fill="x", padx=10, pady=5)
         ttk.Label(limits_frame, text="Score Thresh:").pack(side="left", padx=2)
         self.score_thresh_var = tk.DoubleVar(value=0.5)
         ttk.Entry(limits_frame, textvariable=self.score_thresh_var, width=5).pack(side="left", padx=2)
-
         ttk.Label(limits_frame, text="Suspicious >=").pack(side="left", padx=2)
         self.susp_limit_var = tk.IntVar(value=17)
         ttk.Entry(limits_frame, textvariable=self.susp_limit_var, width=5).pack(side="left", padx=2)
-
         ttk.Label(limits_frame, text="Infested >").pack(side="left", padx=2)
         self.inf_limit_var = tk.IntVar(value=27)
         ttk.Entry(limits_frame, textvariable=self.inf_limit_var, width=5).pack(side="left", padx=2)
-        
-        # User label (expected outcome)
-        ttk.Label(config_frame, text="User Label:").grid(row=7, column=0, sticky="w", pady=5)
-        label_frame = ttk.Frame(config_frame)
-        label_frame.grid(row=7, column=1, sticky="w", padx=5)
-        ttk.Radiobutton(label_frame, text="Infested", variable=self.user_label_var, value="infested").pack(side="left", padx=5)
-        ttk.Radiobutton(label_frame, text="Healthy", variable=self.user_label_var, value="healthy").pack(side="left", padx=5)
-
-        # Save results (WAV + JSON)
-        ttk.Checkbutton(config_frame, text="Save results and audio", variable=self.save_results_var).grid(row=8, column=0, columnspan=3, sticky="w", pady=5)
-
-        # Inference behavior selection
-        self.mode_row = ttk.Frame(config_frame)
-        self.mode_row.grid(row=9, column=0, columnspan=3, sticky="w", pady=5)
-        ttk.Label(self.mode_row, text="Inference Mode:").pack(side="left")
-        mode_frame = ttk.Frame(self.mode_row)
-        mode_frame.pack(side="left", padx=5)
-        ttk.Radiobutton(mode_frame, text="Sliding Window", variable=self.inference_mode_var, value="sliding").pack(side="left", padx=5)
-        ttk.Radiobutton(mode_frame, text=f"Single Shot ({self.single_shot_duration_sec}s)", variable=self.inference_mode_var, value="single").pack(side="left", padx=5)
         
         # --- Dashboard Frame (Left) ---
         dash_frame = ttk.LabelFrame(left_frame, text="Dashboard", padding=12, style="Card.TLabelframe")
@@ -318,13 +275,6 @@ class ModelsTesterApp:
         self.health_tree.tag_configure("NOT_EXECUTED", foreground="gray")
         self.health_tree.pack(fill="x")
 
-        # --- Control Area (Left) ---
-        ctrl_frame = ttk.Frame(left_frame, padding=10)
-        ctrl_frame.pack(fill="x")
-        
-        self.start_btn = ttk.Button(ctrl_frame, text="START TEST", command=self.toggle_test, width=20, style="Primary.TButton")
-        self.start_btn.pack(pady=5)
-
         # Status Log
         status_frame = ttk.Frame(left_frame)
         status_frame.pack(fill="both", expand=True, padx=10, pady=5)
@@ -342,46 +292,16 @@ class ModelsTesterApp:
         self.status_log.configure(state="disabled")
         status_scrollbar.configure(command=self.status_log.yview)
         
-        # --- Plots Area (Right) ---
-        # Scrollable container for individual interactive plots
-        plot_container = ttk.Frame(right_frame)
-        plot_container.pack(fill="both", expand=True)
-
-        plot_canvas = tk.Canvas(plot_container, highlightthickness=0, background=base_bg)
-        vscroll = ttk.Scrollbar(plot_container, orient="vertical", command=plot_canvas.yview)
-        plot_canvas.configure(yscrollcommand=vscroll.set)
-        plot_canvas.pack(side="left", fill="both", expand=True)
-        vscroll.pack(side="right", fill="y")
-
-        plot_frame = ttk.Frame(plot_canvas)
-        frame_window = plot_canvas.create_window((0, 0), window=plot_frame, anchor="nw")
-
-        def _on_frame_configure(event):
-            plot_canvas.configure(scrollregion=plot_canvas.bbox("all"))
-
-        def _on_canvas_configure(event):
-            plot_canvas.itemconfigure(frame_window, width=event.width)
-
-        plot_frame.bind("<Configure>", _on_frame_configure)
-        plot_canvas.bind("<Configure>", _on_canvas_configure)
-
-        def add_plot_section(title):
-            section = ttk.Frame(plot_frame, padding=(0,4))
-            section.pack(fill="x", expand=True)
-            fig = Figure(figsize=(8, 2.6), dpi=100)
-            ax = fig.add_subplot(111)
-            canvas = FigureCanvasTkAgg(fig, master=section)
-            toolbar = NavigationToolbar2Tk(canvas, section, pack_toolbar=False)
-            toolbar.update()
-            toolbar.pack(side="top", fill="x", pady=(0,2))
-            canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-            return ax, canvas
-
-        self.ax_wave, self.canvas_wave = add_plot_section("Waveform")
-        self.ax_hist, self.canvas_hist = add_plot_section("Score Distribution")
-        self.ax_spec, self.canvas_spec = add_plot_section("Mel Spectrogram")
-        self.ax_energy, self.canvas_energy = add_plot_section("Energy Timeline")
-        self.ax_time, self.canvas_time = add_plot_section("Trigger Timeline")
+        # --- Plots Area (Right): one responsive grid figure (no scroll) ---
+        self.plot_fig = Figure(figsize=(7, 6), dpi=100, constrained_layout=True)
+        gs = self.plot_fig.add_gridspec(3, 2)
+        self.ax_wave = self.plot_fig.add_subplot(gs[0, :])      # waveform: full-width top
+        self.ax_spec = self.plot_fig.add_subplot(gs[1, 0])      # spectrogram
+        self.ax_energy = self.plot_fig.add_subplot(gs[1, 1])    # energy timeline
+        self.ax_time = self.plot_fig.add_subplot(gs[2, 0])      # trigger timeline
+        self.ax_hist = self.plot_fig.add_subplot(gs[2, 1])      # score distribution
+        self.plot_canvas = FigureCanvasTkAgg(self.plot_fig, master=right_frame)
+        self.plot_canvas.get_tk_widget().pack(fill="both", expand=True)
 
     def _is_dark_mode(self):
         if platform.system() == "Darwin":
@@ -395,65 +315,22 @@ class ModelsTesterApp:
         return False
         
     def open_prep_settings(self):
-        settings_win = tk.Toplevel(self.root)
-        settings_win.title("Preprocessing Pipeline Configuration")
-        settings_win.geometry("400x300")
-        settings_win.transient(self.root)
-        settings_win.grab_set()
-
-        frame = ttk.Frame(settings_win, padding=20)
-        frame.pack(fill="both", expand=True)
-
-        ttk.Checkbutton(frame, text="Use Bandpass Filter", variable=self.use_filter_var).grid(row=0, column=0, columnspan=2, sticky="w", pady=5)
-
-        row = 1
-        if not self.is_one_shot_model:
-            ttk.Label(frame, text="Duration (sec):").grid(row=row, column=0, sticky="w", pady=5)
-            ttk.Spinbox(frame, from_=0.5, to=10.0, increment=0.5, textvariable=self.duration_var, width=15).grid(row=row, column=1, padx=5)
-            row += 1
-
-        ttk.Label(frame, text="Low Cut (Hz):").grid(row=row, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.low_cut_var, width=15).grid(row=row, column=1, padx=5)
-        row += 1
-
-        ttk.Label(frame, text="Up Cut (Hz):").grid(row=row, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.up_cut_var, width=15).grid(row=row, column=1, padx=5)
-        row += 1
-
-        ttk.Label(frame, text="FFT Win Size (s):").grid(row=row, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.sub_win_size_var, width=15).grid(row=row, column=1, padx=5)
-        row += 1
-
-        ttk.Label(frame, text="Hop Size (s):").grid(row=row, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.sub_hop_size_var, width=15).grid(row=row, column=1, padx=5)
-        row += 1
-
-        ttk.Label(frame, text="Mel Bands:").grid(row=row, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.n_mels_var, width=15).grid(row=row, column=1, padx=5)
-        row += 1
-
-        if not self.is_one_shot_model:
-            ttk.Label(frame, text="Seq Len (frames):").grid(row=row, column=0, sticky="w", pady=5)
-            ttk.Entry(frame, textvariable=self.seq_len_var, width=15).grid(row=row, column=1, padx=5)
-            row += 1
-
-        ttk.Button(frame, text="Close", command=settings_win.destroy).grid(row=row, column=0, columnspan=2, pady=20)
+        SettingsDialog(self).show()
 
     def _update_model_specific_ui(self):
+        # Duration & inference-mode controls now live in the Settings dialog, so we
+        # only set the appropriate mode here (a one-shot model forces single-shot).
         if getattr(self, "is_one_shot_model", False):
             self.inference_mode_var.set("single")
-            self.duration_row.grid_remove()
-            self.mode_row.grid_remove()
         else:
             self.inference_mode_var.set("sliding")
-            self.duration_row.grid()
-            self.mode_row.grid()
 
     def refresh_devices(self):
         input_type = self.input_type_var.get()
         if input_type == 'mic':
             self.file_btn.grid_remove()
-            self.device_combo.grid(row=4, column=1, padx=5, sticky="w")
+            self.device_label.configure(text="Device:")
+            self.device_combo.grid(row=1, column=1, padx=5, sticky="ew")
             try:
                 devices = sd.query_devices()
                 input_devices = [f"{i}: {d['name']}" for i, d in enumerate(devices) if d['max_input_channels'] > 0]
@@ -463,10 +340,9 @@ class ModelsTesterApp:
             except Exception as e:
                 self.log(f"Error listing devices: {e}")
         else:
-            self.device_combo.grid_remove()
-            self.file_btn.grid(row=4, column=2)
             self.device_label.configure(text="Wav File:")
-            self.device_combo.grid(row=4, column=1, padx=5, sticky="w") # reuse combo as entry for file
+            self.device_combo.grid(row=1, column=1, padx=5, sticky="ew")
+            self.file_btn.grid(row=1, column=2, padx=5)
             
     def display_file_entry(self):
         # Helper to swtich UI for file mode
@@ -965,19 +841,19 @@ class ModelsTesterApp:
             if self.raw_audio_snapshot is not None:
                 self.ax_wave.clear()
                 self.ax_wave.plot(self.raw_audio_snapshot[::10]) # Decimate for speed
-                self.ax_wave.set_title("Audio Waveform")
+                self.ax_wave.set_title("Audio Waveform", fontsize=9)
                 self.ax_wave.set_ylim(-1, 1)
+                self.ax_wave.tick_params(labelsize=7)
                 self.ax_wave.grid(True)
-                self.canvas_wave.draw()
-            
+
             # Update Histogram (Score)
             if self.score_history:
                 self.ax_hist.clear()
                 self.ax_hist.hist(self.score_history, bins=10, range=(0,1), color='skyblue', edgecolor='black')
-                self.ax_hist.set_title("Score Distribution")
+                self.ax_hist.set_title("Score Distribution", fontsize=9)
                 self.ax_hist.set_xlim(0, 1)
+                self.ax_hist.tick_params(labelsize=7)
                 self.ax_hist.grid(True)
-                self.canvas_hist.draw()
 
             # Update Spectrogram (Heatmap)
             if self.current_spectrogram is not None:
@@ -985,32 +861,33 @@ class ModelsTesterApp:
                 # Transpose to have Freq on Y, Time on X
                 # specs is (98, 32) -> .T is (32, 98)
                 self.ax_spec.imshow(self.current_spectrogram.T, aspect='auto', origin='lower', cmap='inferno')
-                self.ax_spec.set_title("Mel Spectrogram")
-                self.ax_spec.set_ylabel("Mel Bands")
-                self.ax_spec.set_xlabel("Time Frames")
-                self.canvas_spec.draw()
+                self.ax_spec.set_title("Mel Spectrogram", fontsize=9)
+                self.ax_spec.set_ylabel("Mel Bands", fontsize=8)
+                self.ax_spec.set_xlabel("Time Frames", fontsize=8)
+                self.ax_spec.tick_params(labelsize=7)
 
             # Update Energy
             if self.energy_history:
                 times, energy = zip(*self.energy_history)
                 self.ax_energy.clear()
                 self.ax_energy.plot(times, energy, 'g-')
-                self.ax_energy.set_title("Energy Timeline (RMS)")
+                self.ax_energy.set_title("Energy Timeline (RMS)", fontsize=9)
                 self.ax_energy.set_ylim(0, max(0.1, max(energy) * 1.2)) # Dynamic limit
+                self.ax_energy.tick_params(labelsize=7)
                 self.ax_energy.grid(True)
-                self.canvas_energy.draw()
-            
+
             # Update Timeline
             if self.trigger_history:
                 times, triggers = zip(*self.trigger_history)
                 self.ax_time.clear()
                 self.ax_time.plot(times, triggers, 'r-o', markersize=4)
-                self.ax_time.set_title("Trigger Timeline (1=Pos, 0=Neg)")
+                self.ax_time.set_title("Trigger Timeline (1=Pos, 0=Neg)", fontsize=9)
                 self.ax_time.set_ylim(-0.1, 1.1)
-                self.ax_time.set_xlabel("Time (s)")
+                self.ax_time.set_xlabel("Time (s)", fontsize=8)
+                self.ax_time.tick_params(labelsize=7)
                 self.ax_time.grid(True)
-                self.canvas_time.draw()
-            
+
+            self.plot_canvas.draw_idle()
         except Exception as e:
             self.log(f"Plot Error: {e}")
 

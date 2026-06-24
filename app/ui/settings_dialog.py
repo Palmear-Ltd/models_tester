@@ -1,10 +1,9 @@
-"""
-Settings dialog for preprocessing pipeline configuration.
+"""Tabbed Settings dialog for the model tester.
 
-Provides a comprehensive interface for configuring:
-- Model parameters (duration, sequence length, mel bands, FFT settings)
-- Bandpass filter settings (optional)
-- Sample rate and normalization options (downsampling, PCEN)
+A single modal window consolidating all configuration that does not live on the
+main run bar. It binds directly to the `tk` variables already on the app, so
+edits take effect on the next test start (same as before) — there is no separate
+apply/cancel buffering. Built lazily when opened.
 """
 
 import tkinter as tk
@@ -12,183 +11,98 @@ from tkinter import ttk
 
 
 class SettingsDialog:
-    """
-    Settings dialog for preprocessing pipeline configuration.
-    
-    Creates a modal dialog window with three main sections:
-    1. Model Settings
-    2. Bandpass Filter (Optional)
-    3. Sample Rate & Normalization
-    """
-    
-    def __init__(self, parent, config_vars):
-        """
-        Initialize settings dialog.
-        
-        Args:
-            parent: Parent window (root or Toplevel)
-            config_vars: Dictionary containing all configuration variables:
-                - duration_var: tk.DoubleVar for audio duration
-                - seq_len_var: tk.IntVar for sequence length
-                - n_mels_var: tk.IntVar for mel bands
-                - sub_win_size_var: tk.DoubleVar for FFT window size
-                - sub_hop_size_var: tk.DoubleVar for hop size
-                - use_filter_var: tk.BooleanVar for filter enable
-                - low_cut_var: tk.DoubleVar for low cut frequency
-                - up_cut_var: tk.DoubleVar for high cut frequency
-                - enable_downsample_var: tk.BooleanVar for downsample enable
-                - downsample_sr_var: tk.IntVar for target sample rate
-                - use_pcen_var: tk.BooleanVar for PCEN normalization
-        """
-        self.parent = parent
-        self.config_vars = config_vars
+    """Modal, 3-tab settings window bound to the app's tk variables."""
+
+    def __init__(self, app):
+        self.app = app
         self.window = None
-    
+
     def show(self):
-        """Display the settings dialog."""
-        self.window = tk.Toplevel(self.parent)
-        self.window.title("Pipeline Configuration")
-        self.window.geometry("500x640")
-        self.window.transient(self.parent)
+        app = self.app
+        self.window = tk.Toplevel(app.root)
+        self.window.title("Settings")
+        self.window.geometry("480x420")
+        self.window.transient(app.root)
         self.window.grab_set()
 
-        # Create scrollable frame
-        canvas = tk.Canvas(self.window, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.window, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-        
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        notebook = ttk.Notebook(self.window)
+        notebook.pack(fill="both", expand=True, padx=10, pady=10)
+
+        self._build_model_tab(notebook)
+        self._build_acquisition_tab(notebook)
+        self._build_preprocessing_tab(notebook)
+
+        ttk.Button(self.window, text="Close", command=self.window.destroy).pack(
+            fill="x", padx=10, pady=(0, 10)
         )
-        
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
-        scrollbar.pack(side="right", fill="y")
 
-        # Build sections
-        self._build_model_settings(scrollable_frame)
-        self._build_filter_settings(scrollable_frame)
-        self._build_sample_rate_settings(scrollable_frame)
-        self._build_buttons(scrollable_frame)
-    
-    def _build_model_settings(self, parent):
-        """Build the Model Settings section."""
-        model_frame = ttk.LabelFrame(parent, text="Model Settings", padding=12)
-        model_frame.pack(fill="x", padx=10, pady=10)
+    def _build_model_tab(self, notebook):
+        app = self.app
+        tab = ttk.Frame(notebook, padding=12)
+        notebook.add(tab, text="Model & Scaler")
+        tab.columnconfigure(1, weight=1)
 
-        ttk.Label(model_frame, text="Duration (sec):").grid(row=0, column=0, sticky="w", pady=5)
-        ttk.Spinbox(model_frame, from_=0.5, to=10.0, increment=0.5, 
-                    textvariable=self.config_vars['duration_var'], width=20).grid(row=0, column=1, padx=5, sticky="ew")
+        ttk.Label(tab, text="Model Path (.tflite):").grid(row=0, column=0, sticky="w", pady=5)
+        ttk.Entry(tab, textvariable=app.model_path_var).grid(row=0, column=1, padx=5, sticky="ew")
+        ttk.Button(tab, text="Browse", command=app.load_model_dialog).grid(row=0, column=2)
 
-        ttk.Label(model_frame, text="Sequence Length (frames):").grid(row=1, column=0, sticky="w", pady=5)
-        ttk.Entry(model_frame, textvariable=self.config_vars['seq_len_var'], width=20).grid(row=1, column=1, padx=5, sticky="ew")
+        ttk.Label(tab, text="Scaler Path (.json/.npz):").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Entry(tab, textvariable=app.scaler_path_var).grid(row=1, column=1, padx=5, sticky="ew")
+        ttk.Button(tab, text="Browse", command=app.load_scaler_dialog).grid(row=1, column=2)
 
-        ttk.Label(model_frame, text="Mel Bands:").grid(row=2, column=0, sticky="w", pady=5)
-        ttk.Entry(model_frame, textvariable=self.config_vars['n_mels_var'], width=20).grid(row=2, column=1, padx=5, sticky="ew")
+    def _build_acquisition_tab(self, notebook):
+        app = self.app
+        tab = ttk.Frame(notebook, padding=12)
+        notebook.add(tab, text="Acquisition & Output")
+        tab.columnconfigure(1, weight=1)
 
-        ttk.Label(model_frame, text="FFT Window Size (s):").grid(row=3, column=0, sticky="w", pady=5)
-        ttk.Entry(model_frame, textvariable=self.config_vars['sub_win_size_var'], width=20).grid(row=3, column=1, padx=5, sticky="ew")
+        # Window duration is irrelevant for a one-shot model (it ignores it).
+        if not getattr(app, "is_one_shot_model", False):
+            ttk.Label(tab, text="Window Duration (sec):").grid(row=0, column=0, sticky="w", pady=5)
+            ttk.Spinbox(tab, from_=0.5, to=10.0, increment=0.5, textvariable=app.duration_var, width=12).grid(row=0, column=1, sticky="w", padx=5)
 
-        ttk.Label(model_frame, text="Hop Size (s):").grid(row=4, column=0, sticky="w", pady=5)
-        ttk.Entry(model_frame, textvariable=self.config_vars['sub_hop_size_var'], width=20).grid(row=4, column=1, padx=5, sticky="ew")
+        ttk.Label(tab, text="Output Dir:").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Entry(tab, textvariable=app.output_dir_var).grid(row=1, column=1, padx=5, sticky="ew")
+        ttk.Button(tab, text="Browse", command=app.browse_output_dir).grid(row=1, column=2)
 
-        model_frame.columnconfigure(1, weight=1)
-    
-    def _build_filter_settings(self, parent):
-        """Build the Bandpass Filter section."""
-        filter_frame = ttk.LabelFrame(parent, text="Bandpass Filter (Optional)", padding=12)
-        filter_frame.pack(fill="x", padx=10, pady=10)
+        ttk.Label(tab, text="User Label:").grid(row=2, column=0, sticky="w", pady=5)
+        label_frame = ttk.Frame(tab)
+        label_frame.grid(row=2, column=1, sticky="w", padx=5)
+        ttk.Radiobutton(label_frame, text="Infested", variable=app.user_label_var, value="infested").pack(side="left", padx=5)
+        ttk.Radiobutton(label_frame, text="Healthy", variable=app.user_label_var, value="healthy").pack(side="left", padx=5)
 
-        # Enable filter checkbox
-        filter_check_frame = ttk.Frame(filter_frame)
-        filter_check_frame.grid(row=0, column=0, columnspan=2, sticky="w", pady=5)
-        filter_check = ttk.Checkbutton(
-            filter_check_frame, 
-            variable=self.config_vars['use_filter_var'],
-            command=lambda: self._toggle_filter_settings(filter_low_label, filter_low_entry, filter_up_label, filter_up_entry)
-        )
-        filter_check.pack(side="left")
-        ttk.Label(filter_check_frame, text="Enable Filter").pack(side="left", padx=(2, 0))
+        ttk.Checkbutton(tab, text="Save results and audio", variable=app.save_results_var).grid(row=3, column=0, columnspan=3, sticky="w", pady=5)
 
-        # Filter parameters
-        filter_low_label = ttk.Label(filter_frame, text="Low Cut (Hz):")
-        filter_low_label.grid(row=1, column=0, sticky="w", pady=5)
-        filter_low_entry = ttk.Entry(filter_frame, textvariable=self.config_vars['low_cut_var'], width=20)
-        filter_low_entry.grid(row=1, column=1, padx=5, sticky="ew")
+        ttk.Label(tab, text="Inference Mode:").grid(row=4, column=0, sticky="w", pady=5)
+        mode_frame = ttk.Frame(tab)
+        mode_frame.grid(row=4, column=1, sticky="w", padx=5)
+        ttk.Radiobutton(mode_frame, text="Sliding Window", variable=app.inference_mode_var, value="sliding").pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text=f"Single Shot ({app.single_shot_duration_sec}s)", variable=app.inference_mode_var, value="single").pack(side="left", padx=5)
 
-        filter_up_label = ttk.Label(filter_frame, text="Up Cut (Hz):")
-        filter_up_label.grid(row=2, column=0, sticky="w", pady=5)
-        filter_up_entry = ttk.Entry(filter_frame, textvariable=self.config_vars['up_cut_var'], width=20)
-        filter_up_entry.grid(row=2, column=1, padx=5, sticky="ew")
+    def _build_preprocessing_tab(self, notebook):
+        app = self.app
+        tab = ttk.Frame(notebook, padding=12)
+        notebook.add(tab, text="Preprocessing")
+        tab.columnconfigure(1, weight=1)
 
-        filter_frame.columnconfigure(1, weight=1)
-        
-        # Initialize filter settings state
-        self._toggle_filter_settings(filter_low_label, filter_low_entry, filter_up_label, filter_up_entry)
-    
-    def _build_sample_rate_settings(self, parent):
-        """Build the Sample Rate & Normalization section."""
-        sr_frame = ttk.LabelFrame(parent, text="Sample Rate & Normalization", padding=12)
-        sr_frame.pack(fill="x", padx=10, pady=10)
+        ttk.Checkbutton(tab, text="Use Bandpass Filter", variable=app.use_filter_var).grid(row=0, column=0, columnspan=2, sticky="w", pady=5)
 
-        # Downsample checkbox
-        downsample_check_frame = ttk.Frame(sr_frame)
-        downsample_check_frame.grid(row=0, column=0, columnspan=2, sticky="w", pady=5)
-        downsample_check = ttk.Checkbutton(
-            downsample_check_frame,
-            variable=self.config_vars['enable_downsample_var'],
-            command=lambda: self._toggle_downsample_settings(downsample_label, downsample_spin)
-        )
-        downsample_check.pack(side="left")
-        ttk.Label(downsample_check_frame, text="Downsample Audio").pack(side="left", padx=(2, 0))
+        ttk.Label(tab, text="Low Cut (Hz):").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Entry(tab, textvariable=app.low_cut_var, width=15).grid(row=1, column=1, sticky="w", padx=5)
 
-        # Downsample parameters
-        downsample_label = ttk.Label(sr_frame, text="Target Sample Rate (Hz):")
-        downsample_label.grid(row=1, column=0, sticky="w", pady=5)
-        downsample_spin = ttk.Spinbox(
-            sr_frame, 
-            from_=8000, to=44100, increment=2000,
-            textvariable=self.config_vars['downsample_sr_var'], 
-            width=20
-        )
-        downsample_spin.grid(row=1, column=1, padx=5, sticky="ew")
-        
-        # Initialize downsample settings state
-        self._toggle_downsample_settings(downsample_label, downsample_spin)
+        ttk.Label(tab, text="Up Cut (Hz):").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Entry(tab, textvariable=app.up_cut_var, width=15).grid(row=2, column=1, sticky="w", padx=5)
 
-        # Separator
-        ttk.Separator(sr_frame, orient="horizontal").grid(row=2, column=0, columnspan=2, sticky="ew", pady=10)
+        ttk.Label(tab, text="FFT Win Size (s):").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Entry(tab, textvariable=app.sub_win_size_var, width=15).grid(row=3, column=1, sticky="w", padx=5)
 
-        # PCEN checkbox
-        pcen_check_frame = ttk.Frame(sr_frame)
-        pcen_check_frame.grid(row=3, column=0, columnspan=2, sticky="w", pady=5)
-        ttk.Checkbutton(pcen_check_frame, variable=self.config_vars['use_pcen_var']).pack(side="left")
-        ttk.Label(pcen_check_frame, text="Use PCEN Normalization").pack(side="left", padx=(2, 0))
+        ttk.Label(tab, text="Hop Size (s):").grid(row=4, column=0, sticky="w", pady=5)
+        ttk.Entry(tab, textvariable=app.sub_hop_size_var, width=15).grid(row=4, column=1, sticky="w", padx=5)
 
-        ttk.Label(sr_frame, text="(PCEN: bioacoustics, Log: standard)", 
-                  font=("TkDefaultFont", 8)).grid(row=4, column=0, columnspan=2, sticky="w", pady=0)
+        ttk.Label(tab, text="Mel Bands:").grid(row=5, column=0, sticky="w", pady=5)
+        ttk.Entry(tab, textvariable=app.n_mels_var, width=15).grid(row=5, column=1, sticky="w", padx=5)
 
-        sr_frame.columnconfigure(1, weight=1)
-    
-    def _build_buttons(self, parent):
-        """Build the button section."""
-        button_frame = ttk.Frame(parent)
-        button_frame.pack(fill="x", padx=10, pady=15)
-        ttk.Button(button_frame, text="Close", command=self.window.destroy).pack(fill="x")
-    
-    def _toggle_filter_settings(self, low_label, low_entry, up_label, up_entry):
-        """Enable or disable filter settings based on checkbox state."""
-        state = "normal" if self.config_vars['use_filter_var'].get() else "disabled"
-        low_label.configure(state=state)
-        low_entry.configure(state=state)
-        up_label.configure(state=state)
-        up_entry.configure(state=state)
-
-    def _toggle_downsample_settings(self, label, spinbox):
-        """Enable or disable downsample settings based on checkbox state."""
-        state = "normal" if self.config_vars['enable_downsample_var'].get() else "disabled"
-        label.configure(state=state)
-        spinbox.configure(state=state)
+        # Sequence length does not apply to a one-shot model.
+        if not getattr(app, "is_one_shot_model", False):
+            ttk.Label(tab, text="Seq Len (frames):").grid(row=6, column=0, sticky="w", pady=5)
+            ttk.Entry(tab, textvariable=app.seq_len_var, width=15).grid(row=6, column=1, sticky="w", padx=5)
