@@ -17,8 +17,11 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 from inference_utils import AudioProcessor
-from app.health.defaults import default_pipeline
+from app.health.config import PROFILES, pipeline_for_profile
 from app.health.models import AudioWindow, HealthState
+from app.health.reporting import report_rows
+
+SAMPLE_RATE = 44100  # acquisition sample rate (Hz); the whole pipeline runs at this rate
 
 # Try to import TFLite Interpreter
 try:
@@ -37,7 +40,8 @@ class ModelsTesterApp:
         self.root.minsize(1200, 800)
         
         self.processor = AudioProcessor()
-        self.health_pipeline = default_pipeline()
+        self.profile_var = tk.StringVar(value="development")
+        self.health_pipeline = pipeline_for_profile(self.profile_var.get())
         self.latest_health_report = None
         self._last_health_state = None
         self.is_running = False
@@ -281,7 +285,39 @@ class ModelsTesterApp:
         ttk.Label(energy_frame, text="Current Energy (RMS):").pack(side="left")
         self.energy_bar = ttk.Progressbar(energy_frame, orient="horizontal", length=200, mode="determinate", maximum=1.0)
         self.energy_bar.pack(side="left", padx=10, fill="x", expand=True)
-        
+
+        # Health monitoring profile selector
+        profile_frame = ttk.Frame(left_frame)
+        profile_frame.pack(fill="x", padx=10, pady=(5, 0))
+        ttk.Label(profile_frame, text="Health Profile:").pack(side="left")
+        self.profile_combo = ttk.Combobox(
+            profile_frame,
+            textvariable=self.profile_var,
+            values=list(PROFILES),
+            state="readonly",
+            width=14,
+        )
+        self.profile_combo.pack(side="left", padx=5)
+        self.profile_combo.bind("<<ComboboxSelected>>", self._on_profile_change)
+
+        # --- Signal Health Detail (per-check breakdown) ---
+        health_frame = ttk.LabelFrame(left_frame, text="Signal Health Detail", padding=8, style="Card.TLabelframe")
+        health_frame.pack(fill="x", padx=10, pady=5)
+        self.health_tree = ttk.Treeview(
+            health_frame, columns=("status", "detail"), show="tree headings", height=11
+        )
+        self.health_tree.heading("#0", text="Check")
+        self.health_tree.heading("status", text="Status")
+        self.health_tree.heading("detail", text="Detail")
+        self.health_tree.column("#0", width=180, stretch=False)
+        self.health_tree.column("status", width=80, anchor="center", stretch=False)
+        self.health_tree.column("detail", width=240)
+        self.health_tree.tag_configure("PASS", foreground="green")
+        self.health_tree.tag_configure("WARNING", foreground="orange")
+        self.health_tree.tag_configure("FAIL", foreground="red")
+        self.health_tree.tag_configure("NOT_EXECUTED", foreground="gray")
+        self.health_tree.pack(fill="x")
+
         # --- Control Area (Left) ---
         ctrl_frame = ttk.Frame(left_frame, padding=10)
         ctrl_frame.pack(fill="x")
@@ -695,6 +731,21 @@ class ModelsTesterApp:
             
         self.root.after(100, self.process_queue)
         
+    def _on_profile_change(self, event=None):
+        profile = self.profile_var.get()
+        self.health_pipeline = pipeline_for_profile(profile)
+        self._last_health_state = None
+        count = len(self.health_pipeline.manager.checks)
+        self.log(f"Health profile: {profile} ({count} checks active)")
+
+    def _update_health_panel(self, report):
+        tree = self.health_tree
+        tree.delete(*tree.get_children())
+        for check_id, name, status, detail in report_rows(report):
+            tree.insert(
+                "", "end", text=f"{check_id}  {name}", values=(status, detail), tags=(status,)
+            )
+
     def _update_health_indicator(self, report):
         colors = {
             HealthState.OK: "green",
@@ -711,6 +762,7 @@ class ModelsTesterApp:
         if state != self._last_health_state:
             self._last_health_state = state
             self.log(f"Signal health {state.value}: {report.diagnostic_summary}")
+        self._update_health_panel(report)
 
     def handle_audio_chunk(self, chunk):
         # We need a persistent buffer for the session
@@ -730,7 +782,7 @@ class ModelsTesterApp:
 
         # Audio signal health monitoring — additive; never blocks or alters inference.
         try:
-            window = AudioWindow(samples=self.session_buffer, sample_rate=44100)
+            window = AudioWindow(samples=self.session_buffer, sample_rate=SAMPLE_RATE)
             self.latest_health_report = self.health_pipeline.analyze(window)
             self._update_health_indicator(self.latest_health_report)
         except Exception as e:

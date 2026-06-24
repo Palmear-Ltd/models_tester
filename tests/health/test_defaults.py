@@ -11,8 +11,8 @@ def _win(x):
     return AudioWindow(samples=np.asarray(x, dtype=np.float32), sample_rate=SR)
 
 
-def test_default_manager_registers_seven_checks():
-    assert len(default_manager().checks) == 7
+def test_default_manager_registers_all_checks():
+    assert len(default_manager().checks) == 11  # 7 time-domain + 4 frequency-domain
 
 
 def test_default_pipeline_ok_on_clean_sine():
@@ -20,7 +20,7 @@ def test_default_pipeline_ok_on_clean_sine():
     sig = 0.3 * np.sin(2 * np.pi * 1000.0 * t)
     report = default_pipeline().analyze(_win(sig))
     assert report.final_state is HealthState.OK
-    assert len(report.check_results) == 7
+    assert len(report.check_results) == 11
 
 
 def test_default_pipeline_fault_on_silence():

@@ -9,6 +9,7 @@ import time
 import uuid
 from typing import Any, Optional
 
+from app.health.feature_prep import prepare_features
 from app.health.fusion import decide
 from app.health.manager import SignalCheckManager
 from app.health.models import AudioWindow, HealthReport
@@ -47,7 +48,7 @@ class HealthAnalysisPipeline:
         return window
 
     def _prepare_features(self, window: AudioWindow) -> dict[str, Any]:
-        return {}
+        return prepare_features(window)
 
     def _evaluate_calibration(self, results: list) -> Optional[Any]:
         # Phase 0 no-op; Phase 3 compares results against the calibration profile.

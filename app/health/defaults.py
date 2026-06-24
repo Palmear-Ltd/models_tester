@@ -15,6 +15,12 @@ from app.health.checks.time_domain import (
     SignalEnergyCheck,
     ZeroCrossingRateCheck,
 )
+from app.health.checks.frequency_domain import (
+    BandEnergyDistributionCheck,
+    ElectricalHumCheck,
+    SpectralFlatnessCheck,
+    SpectralShapeCheck,
+)
 from app.health.manager import SignalCheckManager
 from app.health.pipeline import HealthAnalysisPipeline
 
@@ -32,9 +38,19 @@ def default_time_domain_checks() -> list[SignalHealthCheck]:
     ]
 
 
+def default_frequency_domain_checks() -> list[SignalHealthCheck]:
+    """The four frequency-domain checks (F001–F004) with default thresholds."""
+    return [
+        SpectralShapeCheck(),
+        SpectralFlatnessCheck(),
+        BandEnergyDistributionCheck(),
+        ElectricalHumCheck(),
+    ]
+
+
 def default_manager() -> SignalCheckManager:
     manager = SignalCheckManager()
-    for check in default_time_domain_checks():
+    for check in default_time_domain_checks() + default_frequency_domain_checks():
         manager.register(check)
     return manager
 
