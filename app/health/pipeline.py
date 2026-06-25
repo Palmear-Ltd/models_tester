@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections import deque
 from typing import Any, Optional
 
 from app.health.feature_prep import prepare_features
@@ -17,17 +18,23 @@ from app.health.models import AudioWindow, HealthReport
 
 
 class HealthAnalysisPipeline:
-    def __init__(self, manager: Optional[SignalCheckManager] = None, calibration_profile=None):
+    def __init__(self, manager: Optional[SignalCheckManager] = None, calibration_profile=None, history_length: int = 20):
         self.manager = manager if manager is not None else SignalCheckManager()
         self.calibration_profile = calibration_profile
+        self._history: deque = deque(maxlen=history_length)
 
     def analyze(self, window: AudioWindow) -> HealthReport:
         # Stage 1 — Preprocessing (Phase 0: no-op)
         window = self._preprocess(window)
-        # Stage 2 — Feature Preparation (Phase 0: no-op)
+        # Stage 2 — Feature Preparation
         features = self._prepare_features(window)
+        features["history"] = list(self._history)  # prior windows (oldest -> newest)
         # Stage 3 — Signal Health Checks
         results = self.manager.run_checks(window, features)
+        # Record this window's measurements as the next entry of the stability history.
+        self._history.append(
+            {r.check_id: {m.name: m.value for m in r.measurements} for r in results}
+        )
         # Stage 4 — Calibration Evaluation
         calibration_evaluation = self._evaluate_calibration(results)
         # Stage 5 — Anomaly Detection

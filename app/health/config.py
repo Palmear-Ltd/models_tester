@@ -29,6 +29,11 @@ from app.health.checks.time_domain import (
     SignalEnergyCheck,
     ZeroCrossingRateCheck,
 )
+from app.health.checks.stability import (
+    EnergyStabilityCheck,
+    LongTermNoiseFloorCheck,
+    SpectralStabilityCheck,
+)
 from app.health.manager import SignalCheckManager
 from app.health.pipeline import HealthAnalysisPipeline
 
@@ -39,7 +44,7 @@ class CheckSpec:
 
     check_id: str
     factory: type  # a SignalHealthCheck subclass
-    category: str  # config group: "time_domain" | "frequency_domain"
+    category: str  # config group: "time_domain" | "frequency_domain" | "stability"
     mandatory_default: bool = False
 
 
@@ -57,6 +62,9 @@ REGISTRY: list[CheckSpec] = [
     CheckSpec("F002", SpectralFlatnessCheck, "frequency_domain"),
     CheckSpec("F003", BandEnergyDistributionCheck, "frequency_domain"),
     CheckSpec("F004", ElectricalHumCheck, "frequency_domain"),
+    CheckSpec("S001", EnergyStabilityCheck, "stability"),
+    CheckSpec("S002", SpectralStabilityCheck, "stability"),
+    CheckSpec("S003", LongTermNoiseFloorCheck, "stability"),
 ]
 
 
@@ -120,7 +128,7 @@ def _profile_configs() -> dict:
         # Resource-constrained: mandatory checks only (categories disabled).
         "minimal": HealthConfig(
             profile="minimal",
-            categories={"time_domain": False, "frequency_domain": False},
+            categories={"time_domain": False, "frequency_domain": False, "stability": False},
         ),
     }
 

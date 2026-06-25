@@ -48,8 +48,6 @@ def test_pipeline_produces_unique_window_ids():
     assert id1 != id2
 
 
-import numpy as np  # noqa: E402
-
 from app.health.calibration import generate_profile  # noqa: E402
 from app.health.calibration_eval import CalibrationEvaluation  # noqa: E402
 from app.health.config import pipeline_for_profile  # noqa: E402
@@ -73,3 +71,28 @@ def test_pipeline_with_profile_produces_calibration_eval():
     sine_window = AudioWindow(samples=_sine6()[:110250], sample_rate=SR_CAL)
     report = pipeline_for_profile("development", calibration_profile=profile).analyze(sine_window)
     assert isinstance(report.calibration_evaluation, CalibrationEvaluation)
+
+
+from app.health.models import Measurement  # noqa: E402
+
+
+def test_pipeline_history_accumulates_and_passes_prior_windows():
+    seen = []
+
+    class _HistorySpy(SignalHealthCheck):
+        check_id = "SPY"
+        check_name = "spy"
+
+        def run(self, window, features):
+            seen.append(len(features.get("history", [])))
+            return SignalCheckResult(
+                check_id="SPY", check_name="spy", measurements=[Measurement("v", 1.0)]
+            )
+
+    manager = SignalCheckManager()
+    manager.register(_HistorySpy())
+    pipeline = HealthAnalysisPipeline(manager=manager, history_length=3)
+    for _ in range(5):
+        pipeline.analyze(_window())
+    # Each run sees prior windows only, bounded by history_length=3.
+    assert seen == [0, 1, 2, 3, 3]

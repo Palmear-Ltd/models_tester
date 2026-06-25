@@ -20,6 +20,7 @@ from inference_utils import AudioProcessor
 from app.health.config import PROFILES, pipeline_for_profile
 from app.health.models import AudioWindow, HealthState
 from app.health.reporting import report_rows
+from app.health.monitoring import RuntimeMonitor
 from app.ui import SettingsDialog
 
 SAMPLE_RATE = 44100  # acquisition sample rate (Hz); the whole pipeline runs at this rate
@@ -49,6 +50,7 @@ class ModelsTesterApp:
         )
         self.latest_health_report = None
         self._last_health_state = None
+        self.runtime_monitor = RuntimeMonitor()
         self.is_running = False
         self.audio_thread = None
         self.audio_queue = queue.Queue()
@@ -76,6 +78,7 @@ class ModelsTesterApp:
         self.score_history = []
         self.trigger_history = [] # (time, is_trigger)
         self.energy_history = []  # (time, rms)
+        self.health_state_history = []  # (time, level: 0=OK, 1=WARNING, 2=FAULT)
         self.current_energy = 0.0
         self.start_time = 0
         self.raw_audio_snapshot = None # For waveform
@@ -302,12 +305,13 @@ class ModelsTesterApp:
         
         # --- Plots Area (Right): one responsive grid figure (no scroll) ---
         self.plot_fig = Figure(figsize=(7, 6), dpi=100, constrained_layout=True)
-        gs = self.plot_fig.add_gridspec(3, 2)
+        gs = self.plot_fig.add_gridspec(4, 2, height_ratios=[2, 2, 2, 1.3])
         self.ax_wave = self.plot_fig.add_subplot(gs[0, :])      # waveform: full-width top
         self.ax_spec = self.plot_fig.add_subplot(gs[1, 0])      # spectrogram
         self.ax_energy = self.plot_fig.add_subplot(gs[1, 1])    # energy timeline
         self.ax_time = self.plot_fig.add_subplot(gs[2, 0])      # trigger timeline
         self.ax_hist = self.plot_fig.add_subplot(gs[2, 1])      # score distribution
+        self.ax_health = self.plot_fig.add_subplot(gs[3, :])    # health timeline: full-width strip
         self.plot_canvas = FigureCanvasTkAgg(self.plot_fig, master=right_frame)
         self.plot_canvas.get_tk_widget().pack(fill="both", expand=True)
 
@@ -448,6 +452,8 @@ class ModelsTesterApp:
         self.score_history = []
         self.trigger_history = []
         self.energy_history = []
+        self.health_state_history = []
+        self.runtime_monitor = RuntimeMonitor()
         self.start_time = time.time()
         self.session_buffer = np.zeros(int(44100 * self.duration_var.get()), dtype=np.float32)
         self.collected_audio_chunks = []
@@ -691,15 +697,17 @@ class ModelsTesterApp:
             HealthState.FAULT: "red",
             HealthState.UNKNOWN: "gray",
         }
-        state = report.final_state
+        # The monitor debounces the raw per-window verdict into a stable state.
+        events = self.runtime_monitor.update(report)
+        state = self.runtime_monitor.runtime_state
+        level = {HealthState.OK: 0, HealthState.WARNING: 1, HealthState.FAULT: 2}.get(state, 0)
+        self.health_state_history.append((time.time() - self.start_time, level))
         self.health_label.configure(
             text=f"Signal Health: {state.value}",
             foreground=colors.get(state, "gray"),
         )
-        # Log only on transitions to avoid flooding the log every 0.5s.
-        if state != self._last_health_state:
-            self._last_health_state = state
-            self.log(f"Signal health {state.value}: {report.diagnostic_summary}")
+        for event in events:
+            self.log(f"[monitor] {event.message}: {report.diagnostic_summary}")
         self._update_health_panel(report)
 
     def handle_audio_chunk(self, chunk):
@@ -948,6 +956,19 @@ class ModelsTesterApp:
                 self.ax_time.set_xlabel("Time (s)", fontsize=8)
                 self.ax_time.tick_params(labelsize=7)
                 self.ax_time.grid(True)
+
+            # Update Health Timeline (debounced runtime state over time)
+            if self.health_state_history:
+                times, levels = zip(*self.health_state_history)
+                self.ax_health.clear()
+                self.ax_health.step(times, levels, where="post", color="purple")
+                self.ax_health.set_title("Health Timeline", fontsize=9)
+                self.ax_health.set_ylim(-0.2, 2.2)
+                self.ax_health.set_yticks([0, 1, 2])
+                self.ax_health.set_yticklabels(["OK", "WARN", "FAULT"], fontsize=7)
+                self.ax_health.set_xlabel("Time (s)", fontsize=8)
+                self.ax_health.tick_params(labelsize=7)
+                self.ax_health.grid(True)
 
             self.plot_canvas.draw_idle()
         except Exception as e:
