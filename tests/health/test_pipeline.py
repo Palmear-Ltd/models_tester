@@ -46,3 +46,30 @@ def test_pipeline_produces_unique_window_ids():
     id1 = pipeline.analyze(_window()).window_id
     id2 = pipeline.analyze(_window()).window_id
     assert id1 != id2
+
+
+import numpy as np  # noqa: E402
+
+from app.health.calibration import generate_profile  # noqa: E402
+from app.health.calibration_eval import CalibrationEvaluation  # noqa: E402
+from app.health.config import pipeline_for_profile  # noqa: E402
+
+SR_CAL = 44100
+
+
+def _sine6():
+    n = int(6.0 * SR_CAL)
+    return (0.3 * np.sin(2 * np.pi * 1000.0 * np.arange(n) / SR_CAL)).astype(np.float32)
+
+
+def test_pipeline_without_profile_has_no_calibration_eval():
+    window = AudioWindow(samples=np.zeros(110250, dtype=np.float32), sample_rate=SR_CAL)
+    report = pipeline_for_profile("development").analyze(window)
+    assert report.calibration_evaluation is None
+
+
+def test_pipeline_with_profile_produces_calibration_eval():
+    profile = generate_profile([_sine6()], SR_CAL, profile_id="p")
+    sine_window = AudioWindow(samples=_sine6()[:110250], sample_rate=SR_CAL)
+    report = pipeline_for_profile("development", calibration_profile=profile).analyze(sine_window)
+    assert isinstance(report.calibration_evaluation, CalibrationEvaluation)

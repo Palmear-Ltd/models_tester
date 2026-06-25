@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 import sounddevice as sd
 import soundfile as sf
 import numpy as np
@@ -42,7 +42,11 @@ class ModelsTesterApp:
         
         self.processor = AudioProcessor()
         self.profile_var = tk.StringVar(value="development")
-        self.health_pipeline = pipeline_for_profile(self.profile_var.get())
+        self.calibration_profile = None
+        self.calibration_profile_path_var = tk.StringVar(value="")
+        self.health_pipeline = pipeline_for_profile(
+            self.profile_var.get(), calibration_profile=self.calibration_profile
+        )
         self.latest_health_report = None
         self._last_health_state = None
         self.is_running = False
@@ -256,19 +260,23 @@ class ModelsTesterApp:
         )
         self.profile_combo.pack(side="left", padx=5)
         self.profile_combo.bind("<<ComboboxSelected>>", self._on_profile_change)
+        self.cal_label = ttk.Label(profile_frame, text="Calibration: none")
+        self.cal_label.pack(side="left", padx=12)
 
         # --- Signal Health Detail (per-check breakdown) ---
         health_frame = ttk.LabelFrame(left_frame, text="Signal Health Detail", padding=8, style="Card.TLabelframe")
         health_frame.pack(fill="x", padx=10, pady=5)
         self.health_tree = ttk.Treeview(
-            health_frame, columns=("status", "detail"), show="tree headings", height=11
+            health_frame, columns=("status", "cal", "detail"), show="tree headings", height=11
         )
         self.health_tree.heading("#0", text="Check")
         self.health_tree.heading("status", text="Status")
+        self.health_tree.heading("cal", text="Cal")
         self.health_tree.heading("detail", text="Detail")
-        self.health_tree.column("#0", width=180, stretch=False)
-        self.health_tree.column("status", width=80, anchor="center", stretch=False)
-        self.health_tree.column("detail", width=240)
+        self.health_tree.column("#0", width=170, stretch=False)
+        self.health_tree.column("status", width=70, anchor="center", stretch=False)
+        self.health_tree.column("cal", width=60, anchor="center", stretch=False)
+        self.health_tree.column("detail", width=210)
         self.health_tree.tag_configure("PASS", foreground="green")
         self.health_tree.tag_configure("WARNING", foreground="orange")
         self.health_tree.tag_configure("FAIL", foreground="red")
@@ -607,19 +615,73 @@ class ModelsTesterApp:
             
         self.root.after(100, self.process_queue)
         
-    def _on_profile_change(self, event=None):
-        profile = self.profile_var.get()
-        self.health_pipeline = pipeline_for_profile(profile)
+    def _rebuild_health_pipeline(self):
+        self.health_pipeline = pipeline_for_profile(
+            self.profile_var.get(), calibration_profile=self.calibration_profile
+        )
         self._last_health_state = None
+
+    def _load_calibration_profile(self, path):
+        from app.health.calibration import load_profile
+
+        try:
+            self.calibration_profile = load_profile(path)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load calibration profile:\n{e}")
+            return
+        self.calibration_profile_path_var.set(path)
+        self._rebuild_health_pipeline()
+        p = self.calibration_profile
+        self.cal_label.configure(text=f"Calibration: {p.profile_id} ({p.window_count} win)")
+        self.log(f"Loaded calibration profile '{p.profile_id}' ({p.window_count} windows)")
+
+    def generate_calibration_profile(self):
+        import calibrate
+
+        folder = filedialog.askdirectory(title="Select folder of HEALTHY recordings")
+        if not folder:
+            return
+        out = filedialog.asksaveasfilename(
+            title="Save calibration profile", defaultextension=".json",
+            filetypes=[("Calibration profile", "*.json")],
+        )
+        if not out:
+            return
+        profile_id = simpledialog.askstring(
+            "Calibration profile id", "Profile id:", initialvalue="piezo"
+        )
+        if not profile_id:
+            return
+        self.log(f"Generating calibration profile from {folder} ...")
+        self.root.update_idletasks()
+        try:
+            profile = calibrate.run(folder, out, profile_id=profile_id)
+        except Exception as e:
+            messagebox.showerror("Error", f"Calibration failed:\n{e}")
+            return
+        self.log(f"Calibration profile saved: {out} ({profile.window_count} windows)")
+        self._load_calibration_profile(out)
+
+    def browse_calibration_profile(self):
+        path = filedialog.askopenfilename(
+            title="Select calibration profile", filetypes=[("Calibration profile", "*.json")]
+        )
+        if path:
+            self._load_calibration_profile(path)
+
+    def _on_profile_change(self, event=None):
+        self._rebuild_health_pipeline()
+        profile = self.profile_var.get()
         count = len(self.health_pipeline.manager.checks)
         self.log(f"Health profile: {profile} ({count} checks active)")
 
     def _update_health_panel(self, report):
         tree = self.health_tree
         tree.delete(*tree.get_children())
-        for check_id, name, status, detail in report_rows(report):
+        for check_id, name, status, detail, cal in report_rows(report):
             tree.insert(
-                "", "end", text=f"{check_id}  {name}", values=(status, detail), tags=(status,)
+                "", "end", text=f"{check_id}  {name}",
+                values=(status, cal, detail), tags=(status,)
             )
 
     def _update_health_indicator(self, report):

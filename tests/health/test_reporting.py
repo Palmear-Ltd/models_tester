@@ -62,3 +62,33 @@ def test_report_rows_one_per_check():
     assert len(rows) == 2
     assert rows[0][0] == "T001"
     assert rows[1][0] == "T002"
+
+
+from app.health.calibration_eval import CalibrationEvaluation, MeasurementDeviation  # noqa: E402
+
+
+def test_report_rows_blank_calibration_when_none():
+    report = HealthReport(
+        timestamp=0.0, window_id="w",
+        check_results=[_result("T001", "Flatline", CheckStatus.PASS)],
+    )
+    rows = report_rows(report)
+    assert rows[0][4] == ""  # 5th element = calibration verdict
+
+
+def test_report_rows_marks_calibration_deviation_per_check():
+    ev = CalibrationEvaluation(
+        deviations=[MeasurementDeviation("T002", "rms", 9.9, 0.1, 0.3, CheckStatus.FAIL)],
+        warn_count=0, fault_count=1,
+    )
+    report = HealthReport(
+        timestamp=0.0, window_id="w",
+        check_results=[
+            _result("T001", "Flatline", CheckStatus.PASS),
+            _result("T002", "Signal Energy", CheckStatus.PASS),
+        ],
+        calibration_evaluation=ev,
+    )
+    by_id = {r[0]: r for r in report_rows(report)}
+    assert by_id["T002"][4] == "FAIL"
+    assert by_id["T001"][4] == ""

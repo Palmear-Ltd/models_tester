@@ -105,3 +105,38 @@ def test_summary_includes_diagnostics():
     state, confidence, summary = decide(rs)
     assert state is HealthState.FAULT
     assert "Flatline" in summary
+
+
+from app.health.calibration_eval import CalibrationEvaluation  # noqa: E402
+
+
+def _cal(warn=0, fault=0):
+    return CalibrationEvaluation(
+        deviations=[], warn_count=warn, fault_count=fault,
+        summary="cal deviation" if (warn or fault) else "",
+    )
+
+
+def test_calibration_none_preserves_check_decision():
+    rs = [_res("T001", CheckStatus.PASS, CheckCategory.CRITICAL)]
+    assert decide(rs, None)[0] is HealthState.OK
+
+
+def test_calibration_warning_escalates_ok_to_warning():
+    rs = [_res("T001", CheckStatus.PASS, CheckCategory.CRITICAL)]
+    assert decide(rs, _cal(warn=1))[0] is HealthState.WARNING
+
+
+def test_single_calibration_fault_is_warning():
+    rs = [_res("T001", CheckStatus.PASS, CheckCategory.CRITICAL)]
+    assert decide(rs, _cal(fault=1))[0] is HealthState.WARNING
+
+
+def test_two_calibration_faults_is_fault():
+    rs = [_res("T001", CheckStatus.PASS, CheckCategory.CRITICAL)]
+    assert decide(rs, _cal(fault=2))[0] is HealthState.FAULT
+
+
+def test_check_fault_not_downgraded_by_clean_calibration():
+    rs = [_res("T001", CheckStatus.FAIL, CheckCategory.CRITICAL)]
+    assert decide(rs, _cal())[0] is HealthState.FAULT

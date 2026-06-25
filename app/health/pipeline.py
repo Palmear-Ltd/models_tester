@@ -10,14 +10,16 @@ import uuid
 from typing import Any, Optional
 
 from app.health.feature_prep import prepare_features
+from app.health.calibration_eval import CalibrationEvaluation, evaluate_calibration
 from app.health.fusion import decide
 from app.health.manager import SignalCheckManager
 from app.health.models import AudioWindow, HealthReport
 
 
 class HealthAnalysisPipeline:
-    def __init__(self, manager: Optional[SignalCheckManager] = None):
+    def __init__(self, manager: Optional[SignalCheckManager] = None, calibration_profile=None):
         self.manager = manager if manager is not None else SignalCheckManager()
+        self.calibration_profile = calibration_profile
 
     def analyze(self, window: AudioWindow) -> HealthReport:
         # Stage 1 — Preprocessing (Phase 0: no-op)
@@ -31,7 +33,7 @@ class HealthAnalysisPipeline:
         # Stage 5 — Anomaly Detection
         anomaly_result = self._detect_anomalies(features, results)
         # Stage 6 — Decision Fusion
-        final_state, confidence, summary = decide(results)
+        final_state, confidence, summary = decide(results, calibration_evaluation)
         # Stage 7 — Health Report Generation
         return HealthReport(
             timestamp=time.time(),
@@ -50,9 +52,10 @@ class HealthAnalysisPipeline:
     def _prepare_features(self, window: AudioWindow) -> dict[str, Any]:
         return prepare_features(window)
 
-    def _evaluate_calibration(self, results: list) -> Optional[Any]:
-        # Phase 0 no-op; Phase 3 compares results against the calibration profile.
-        return None
+    def _evaluate_calibration(self, results: list) -> Optional[CalibrationEvaluation]:
+        if self.calibration_profile is None:
+            return None
+        return evaluate_calibration(results, self.calibration_profile)
 
     def _detect_anomalies(self, features: dict, results: list) -> Optional[Any]:
         # Phase 0 no-op; Phase 6 scores the feature vector against healthy behaviour.

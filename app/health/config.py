@@ -98,8 +98,10 @@ def build_manager(config: HealthConfig) -> SignalCheckManager:
     return manager
 
 
-def build_pipeline(config: HealthConfig) -> HealthAnalysisPipeline:
-    return HealthAnalysisPipeline(manager=build_manager(config))
+def build_pipeline(config: HealthConfig, calibration_profile=None) -> HealthAnalysisPipeline:
+    return HealthAnalysisPipeline(
+        manager=build_manager(config), calibration_profile=calibration_profile
+    )
 
 
 PROFILES = ("development", "production", "diagnostic", "minimal")
@@ -130,5 +132,5 @@ def config_for_profile(name: str) -> HealthConfig:
     return configs[name]
 
 
-def pipeline_for_profile(name: str) -> HealthAnalysisPipeline:
-    return build_pipeline(config_for_profile(name))
+def pipeline_for_profile(name: str, calibration_profile=None) -> HealthAnalysisPipeline:
+    return build_pipeline(config_for_profile(name), calibration_profile=calibration_profile)

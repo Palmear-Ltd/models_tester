@@ -34,6 +34,22 @@ def check_row(result: SignalCheckResult) -> tuple[str, str, str, str]:
     return (result.check_id, result.check_name, result.status.value, detail)
 
 
-def report_rows(report: HealthReport) -> list[tuple[str, str, str, str]]:
-    """One display row per check result, in pipeline execution order."""
-    return [check_row(r) for r in report.check_results]
+def report_rows(report: HealthReport) -> list[tuple[str, str, str, str, str]]:
+    """One display row per check: (check_id, name, status, detail, calibration).
+
+    `calibration` is the worst calibration verdict for that check from
+    `report.calibration_evaluation` ("FAIL" beats "WARNING"), or "" when the
+    check has no calibration deviation (or no profile is loaded).
+    """
+    cal_by_check: dict[str, str] = {}
+    evaluation = report.calibration_evaluation
+    if evaluation is not None:
+        for d in evaluation.deviations:
+            verdict = d.verdict.value  # "FAIL" or "WARNING"
+            if verdict == "FAIL" or d.check_id not in cal_by_check:
+                cal_by_check[d.check_id] = verdict
+    rows = []
+    for r in report.check_results:
+        check_id, name, status, detail = check_row(r)
+        rows.append((check_id, name, status, detail, cal_by_check.get(check_id, "")))
+    return rows

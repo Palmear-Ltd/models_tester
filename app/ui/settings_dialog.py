@@ -50,6 +50,13 @@ class SettingsDialog:
         ttk.Entry(tab, textvariable=app.scaler_path_var).grid(row=1, column=1, padx=5, sticky="ew")
         ttk.Button(tab, text="Browse", command=app.load_scaler_dialog).grid(row=1, column=2)
 
+        ttk.Label(tab, text="Calibration Profile (.json):").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Entry(tab, textvariable=app.calibration_profile_path_var).grid(row=2, column=1, padx=5, sticky="ew")
+        ttk.Button(tab, text="Browse", command=app.browse_calibration_profile).grid(row=2, column=2)
+        ttk.Button(
+            tab, text="Generate from recordings…", command=app.generate_calibration_profile
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=5)
+
     def _build_acquisition_tab(self, notebook):
         app = self.app
         tab = ttk.Frame(notebook, padding=12)
