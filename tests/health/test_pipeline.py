@@ -96,3 +96,28 @@ def test_pipeline_history_accumulates_and_passes_prior_windows():
         pipeline.analyze(_window())
     # Each run sees prior windows only, bounded by history_length=3.
     assert seen == [0, 1, 2, 3, 3]
+
+
+def test_pipeline_populates_anomaly_and_confidence_with_profile():
+    import numpy as np
+    from app.health.calibration import generate_profile
+    from app.health.config import pipeline_for_profile
+
+    sr, n = 44100, int(44100 * 2.5)
+    rng = np.random.default_rng(0)
+    healthy = [(0.2 * np.sin(2 * np.pi * 1000 * np.arange(n) / sr)
+                + 0.01 * rng.standard_normal(n)).astype(np.float32) for _ in range(3)]
+    profile = generate_profile(healthy, sr, profile_id="t")
+
+    pipe = pipeline_for_profile("development", calibration_profile=profile)
+    report = pipe.analyze(AudioWindow(samples=healthy[0], sample_rate=sr))
+    assert report.anomaly_result is not None
+    assert report.confidence == report.anomaly_result.confidence
+
+
+def test_pipeline_without_profile_has_no_anomaly():
+    from app.health.config import pipeline_for_profile
+
+    pipe = pipeline_for_profile("development")  # no calibration profile
+    report = pipe.analyze(_window())
+    assert report.anomaly_result is None

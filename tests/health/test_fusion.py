@@ -140,3 +140,42 @@ def test_two_calibration_faults_is_fault():
 def test_check_fault_not_downgraded_by_clean_calibration():
     rs = [_res("T001", CheckStatus.FAIL, CheckCategory.CRITICAL)]
     assert decide(rs, _cal())[0] is HealthState.FAULT
+
+
+from app.health.models import (  # noqa: E402,F811
+    CheckCategory,
+    CheckStatus,
+    HealthState,
+    SignalCheckResult,
+)
+
+
+class _Anom:
+    def __init__(self, confidence, is_anomalous=True, distance=4.0):
+        self.confidence = confidence
+        self.is_anomalous = is_anomalous
+        self.distance = distance
+        self.contributors = [("F001.spectral_centroid", 4.8)]
+
+
+def _passing_results():
+    return [
+        SignalCheckResult(
+            check_id="T002", check_name="Signal Energy",
+            status=CheckStatus.PASS, category=CheckCategory.CRITICAL, executed=True,
+        )
+    ]
+
+
+def test_decide_without_anomaly_keeps_check_confidence():
+    state, confidence, _ = decide(_passing_results())
+    assert state is HealthState.OK
+    assert confidence == 1.0
+
+
+def test_decide_with_anomaly_sets_confidence_and_keeps_state():
+    state, confidence, summary = decide(_passing_results(), None, _Anom(confidence=0.25))
+    assert state is HealthState.OK  # anomaly never changes state
+    assert confidence == 0.25
+    assert "anomaly distance" in summary
+    assert "F001.spectral_centroid" in summary

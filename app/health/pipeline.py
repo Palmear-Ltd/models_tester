@@ -40,7 +40,7 @@ class HealthAnalysisPipeline:
         # Stage 5 — Anomaly Detection
         anomaly_result = self._detect_anomalies(features, results)
         # Stage 6 — Decision Fusion
-        final_state, confidence, summary = decide(results, calibration_evaluation)
+        final_state, confidence, summary = decide(results, calibration_evaluation, anomaly_result)
         # Stage 7 — Health Report Generation
         return HealthReport(
             timestamp=time.time(),
@@ -65,5 +65,10 @@ class HealthAnalysisPipeline:
         return evaluate_calibration(results, self.calibration_profile)
 
     def _detect_anomalies(self, features: dict, results: list) -> Optional[Any]:
-        # Phase 0 no-op; Phase 6 scores the feature vector against healthy behaviour.
-        return None
+        # Phase 6: holistic RMS z-distance of this window's measurements from the
+        # calibration profile (only when a profile is loaded).
+        if self.calibration_profile is None:
+            return None
+        from app.health.anomaly import detect_anomaly
+
+        return detect_anomaly(results, self.calibration_profile)

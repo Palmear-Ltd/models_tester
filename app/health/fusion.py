@@ -34,7 +34,7 @@ def _calibration_state(evaluation) -> HealthState:
     return HealthState.OK
 
 
-def decide(results, calibration_evaluation=None) -> tuple[HealthState, float, str]:
+def decide(results, calibration_evaluation=None, anomaly_result=None) -> tuple[HealthState, float, str]:
     """Return (final_state, confidence, diagnostic_summary).
 
     The check-based decision is computed first; if a calibration evaluation is
@@ -91,5 +91,15 @@ def decide(results, calibration_evaluation=None) -> tuple[HealthState, float, st
                 if summary
                 else calibration_evaluation.summary
             )
+
+    # Fold in the anomaly result: it sets confidence (calibration owns state).
+    if anomaly_result is not None:
+        confidence = anomaly_result.confidence
+        label = "ANOMALOUS" if anomaly_result.is_anomalous else "normal"
+        note = f"anomaly distance {anomaly_result.distance:.1f} ({label})"
+        if anomaly_result.contributors:
+            top_label, top_z = anomaly_result.contributors[0]
+            note += f", {top_label} z={top_z:.1f}"
+        summary = f"{summary} | {note}" if summary else note
 
     return state, confidence, summary

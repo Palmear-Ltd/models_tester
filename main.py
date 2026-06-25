@@ -21,9 +21,11 @@ from app.health.config import PROFILES, pipeline_for_profile
 from app.health.models import AudioWindow, HealthState
 from app.health.reporting import report_rows
 from app.health.monitoring import RuntimeMonitor
+from app.health.startup import StartupDecision, run_validation
 from app.ui import SettingsDialog
 
 SAMPLE_RATE = 44100  # acquisition sample rate (Hz); the whole pipeline runs at this rate
+VALIDATION_WINDOWS = 40  # ~20 s of validation at 0.5 s per window
 
 # Try to import TFLite Interpreter
 try:
@@ -51,6 +53,9 @@ class ModelsTesterApp:
         self.latest_health_report = None
         self._last_health_state = None
         self.runtime_monitor = RuntimeMonitor()
+        self._validating = False
+        self._validation_reports = []
+        self._last_anomalous = False
         self.is_running = False
         self.audio_thread = None
         self.audio_queue = queue.Queue()
@@ -194,6 +199,7 @@ class ModelsTesterApp:
         self.start_btn = ttk.Button(controls_frame, text="START TEST", command=self.toggle_test, width=18, style="Primary.TButton")
         self.start_btn.pack(side="left")
         ttk.Button(controls_frame, text="⚙ Settings", command=self.open_prep_settings).pack(side="left", padx=8)
+        ttk.Button(controls_frame, text="Validate Acquisition", command=self.validate_acquisition).pack(side="left", padx=8)
 
         # --- Thresholds strip (Left) ---
         limits_frame = ttk.LabelFrame(left_frame, text="Thresholds", padding=8, style="Card.TLabelframe")
@@ -454,6 +460,7 @@ class ModelsTesterApp:
         self.energy_history = []
         self.health_state_history = []
         self.runtime_monitor = RuntimeMonitor()
+        self._last_anomalous = False
         self.start_time = time.time()
         self.session_buffer = np.zeros(int(44100 * self.duration_var.get()), dtype=np.float32)
         self.collected_audio_chunks = []
@@ -690,6 +697,32 @@ class ModelsTesterApp:
                 values=(status, cal, detail), tags=(status,)
             )
 
+    def validate_acquisition(self):
+        if not self.is_running:
+            messagebox.showinfo(
+                "Validate Acquisition",
+                "Start a test first, then click Validate to assess ~20 s of the live signal.",
+            )
+            return
+        self._validation_reports = []
+        self._validating = True
+        self.log("Validating acquisition over the next ~20 s ...")
+
+    def _show_validation_result(self):
+        result = run_validation(
+            self._validation_reports,
+            sample_rate=SAMPLE_RATE,
+            input_ready=True,
+            calibration_loaded=self.calibration_profile is not None,
+        )
+        self.log(f"[validation] {result.summary}")
+        show = {
+            StartupDecision.PASS: messagebox.showinfo,
+            StartupDecision.WARNING: messagebox.showwarning,
+            StartupDecision.FAIL: messagebox.showerror,
+        }[result.decision]
+        show("Acquisition Validation", f"{result.decision.value}\n\n{result.summary}")
+
     def _update_health_indicator(self, report):
         colors = {
             HealthState.OK: "green",
@@ -703,11 +736,18 @@ class ModelsTesterApp:
         level = {HealthState.OK: 0, HealthState.WARNING: 1, HealthState.FAULT: 2}.get(state, 0)
         self.health_state_history.append((time.time() - self.start_time, level))
         self.health_label.configure(
-            text=f"Signal Health: {state.value}",
+            text=f"Signal Health: {state.value} · conf {report.confidence:.2f}",
             foreground=colors.get(state, "gray"),
         )
         for event in events:
             self.log(f"[monitor] {event.message}: {report.diagnostic_summary}")
+        # Log an anomaly only on its rising edge (anomaly_result is None without a profile).
+        anomaly = report.anomaly_result
+        anomalous = anomaly is not None and anomaly.is_anomalous
+        if anomalous and not self._last_anomalous:
+            top_label, top_z = anomaly.contributors[0] if anomaly.contributors else ("", 0.0)
+            self.log(f"[anomaly] distance {anomaly.distance:.1f} — {top_label} z={top_z:.1f}")
+        self._last_anomalous = anomalous
         self._update_health_panel(report)
 
     def handle_audio_chunk(self, chunk):
@@ -731,6 +771,11 @@ class ModelsTesterApp:
             window = AudioWindow(samples=self.session_buffer, sample_rate=SAMPLE_RATE)
             self.latest_health_report = self.health_pipeline.analyze(window)
             self._update_health_indicator(self.latest_health_report)
+            if self._validating and self.latest_health_report is not None:
+                self._validation_reports.append(self.latest_health_report)
+                if len(self._validation_reports) >= VALIDATION_WINDOWS:
+                    self._validating = False
+                    self._show_validation_result()
         except Exception as e:
             self.log(f"Health monitoring error: {e}")
 
