@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from app.health.checks.frequency_domain import (
     ElectricalHumCheck,
@@ -25,6 +26,27 @@ def _win(x):
 def _sine(freq, n=N, amp=0.3):
     t = np.arange(n) / SR
     return amp * np.sin(2 * np.pi * freq * t)
+
+
+def _pink_noise(seed, n=N, sr=SR):
+    """Synthesize 1/f ("pink") noise by shaping white noise's FFT magnitude by
+    1/sqrt(f) (power ~ 1/f) before an inverse transform. Real acoustic content
+    (insect audio, ambient background) plausibly has this kind of non-flat,
+    low-frequency-heavy noise floor -- unlike the flat white/uniform noise
+    fixtures used elsewhere in this file, which don't exercise a non-flat
+    local_floor reference at all.
+    """
+    rng = np.random.default_rng(seed)
+    white = rng.normal(size=n)
+    spectrum = np.fft.rfft(white)
+    freqs = np.fft.rfftfreq(n, d=1.0 / sr)
+    scale = np.ones_like(freqs)
+    nonzero = freqs > 0
+    scale[nonzero] = 1.0 / np.sqrt(freqs[nonzero])
+    if nonzero.any():
+        scale[~nonzero] = scale[nonzero][0]
+    pink = np.fft.irfft(spectrum * scale, n=n)
+    return (pink / np.std(pink)).astype(np.float32)
 
 
 def _measure(result, name):
@@ -98,4 +120,29 @@ def test_harmonic_resonance_passes_on_non_finite_input():
     # samples directly, only the prepared spectrum.
     x = np.full(N, np.nan, dtype=np.float32)
     result = HarmonicResonanceCheck().run(_win(x), _feats(x))
+    assert result.status is CheckStatus.PASS
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Known limitation (code review finding, see cm-task-2-report.md 'Deviation 4'): "
+        "local_floor is a whole-candidate-band median (~9,800 bins from 80-4000Hz minus "
+        "hum, minus the peak's own window), not a genuinely local neighborhood around f0. "
+        "That whole-band reference is deliberate -- prominence_k=50's extreme-value "
+        "argument only holds if the reference population is the same set of bins argmax "
+        "was drawn from -- but it means a non-flat (e.g. pink/1-over-f) noise floor drags "
+        "the whole-band median down relative to the naturally louder low-frequency bins, "
+        "so the loudest low-frequency bin looks artificially 'prominent' against that "
+        "depressed floor. Confirmed on 10 independent pink-noise seeds: all 10 produced "
+        "WARNING or FAIL, none PASSed, on fault-free content. This test pins one "
+        "deterministic seed so an eventual fix (a genuinely local floor, or a "
+        "frequency-dependent one) shows up as an unexpected XPASS rather than silently "
+        "landing unnoticed."
+    ),
+)
+def test_harmonic_resonance_false_positives_on_pink_noise_floor():
+    pink = _pink_noise(seed=0)
+    result = HarmonicResonanceCheck().run(_win(pink), _feats(pink))
+    # Fault-free realistic content should PASS; today it doesn't.
     assert result.status is CheckStatus.PASS
