@@ -1,0 +1,57 @@
+import json
+from app.health.serialization import startup_result_to_dict, anomaly_event_to_dict
+
+
+class _Sys:
+    passed = True
+    errors = []
+    warnings = ["No calibration profile loaded"]
+
+
+class _Sig:
+    total = 40
+    ok = 38
+    warning = 1
+    fault = 1
+    check_failures = {"T002": 2}
+
+
+class _Decision:
+    value = "WARNING"
+
+
+class _Startup:
+    decision = _Decision()
+    system = _Sys()
+    signal = _Sig()
+    summary = "WARNING: 38 OK / 1 WARNING / 1 FAULT of 40 windows"
+
+
+class _Anomaly:
+    distance = 5.2
+    threshold = 4.0
+    is_anomalous = True
+    contributors = [("T002.rms", 3.1), ("F001.spectral_centroid", 1.2)]
+    confidence = 0.35
+
+
+def test_startup_result_to_dict_is_json_serializable():
+    d = startup_result_to_dict(_Startup())
+    assert d["decision"] == "WARNING"
+    assert d["signal"]["total"] == 40
+    assert d["signal"]["check_failures"] == {"T002": 2}
+    assert d["system"]["warnings"] == ["No calibration profile loaded"]
+    assert d["summary"].startswith("WARNING")
+    json.dumps(d)  # must not raise
+
+
+def test_anomaly_event_to_dict_is_json_serializable():
+    d = anomaly_event_to_dict(_Anomaly(), source="mic", timestamp="20260706_120000")
+    assert d["distance"] == 5.2
+    assert d["threshold"] == 4.0
+    assert d["is_anomalous"] is True
+    assert d["confidence"] == 0.35
+    assert d["source"] == "mic"
+    assert d["timestamp"] == "20260706_120000"
+    assert d["contributors"] == [["T002.rms", 3.1], ["F001.spectral_centroid", 1.2]]
+    json.dumps(d)  # must not raise

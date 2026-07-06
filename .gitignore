@@ -29,3 +29,7 @@ models/*/output/
 # Test artifacts
 *.log
 .pytest_cache/
+.omc
+test_data/archive/
+test_data/audio_signal_health
+reports/

@@ -27,6 +27,11 @@ class AudioProcessor:
     def load_scaler(self, path):
         return self._scaler.load(path)
 
+    @property
+    def last_scaler_error(self):
+        """Reason the most recent load_scaler() failed, or None on success."""
+        return self._scaler.last_error
+
     def apply_scaler(self, features, mean=None, var=None):
         return self._scaler.apply(features, mean, var)
 
