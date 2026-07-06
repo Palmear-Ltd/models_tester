@@ -65,8 +65,8 @@ class HealthAnalysisPipeline:
         return evaluate_calibration(results, self.calibration_profile)
 
     def _detect_anomalies(self, features: dict, results: list) -> Optional[Any]:
-        # Phase 6: holistic RMS z-distance of this window's measurements from the
-        # calibration profile (only when a profile is loaded).
+        # Phase 7c: full-covariance Mahalanobis distance of this window's
+        # measurements from the calibration profile (only when a profile is loaded).
         if self.calibration_profile is None:
             return None
         from app.health.anomaly import detect_anomaly
