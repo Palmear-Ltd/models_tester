@@ -128,3 +128,43 @@ class LongTermNoiseFloorCheck(SignalHealthCheck):
             measurements=[Measurement("noise_floor", noise_floor)],
             diagnostic_messages=diagnostics,
         )
+
+
+class DropoutRecurrenceCheck(SignalHealthCheck):
+    """S004 — flag a T008 dropout event recurring across recent windows.
+
+    A single boundary-touching T008 dropout in one window is ambiguous (it may
+    just be a transient at the window edge). Because consecutive windows overlap
+    80% (2.5s window / 0.5s hop), the same physical cut reappears across several
+    windows' ``dropout_event_count`` history if it is a real fault, not a one-off
+    transient. Confirmatory-only (SUPPORTING): this never runs stronger than T008
+    itself, it only adds confidence when T008 already flagged something.
+    """
+
+    check_id = "S004"
+    check_name = "Dropout Recurrence"
+    category = CheckCategory.SUPPORTING
+
+    def __init__(self, min_samples: int = 5, max_recurrence: float = 0.3):
+        self.min_samples = min_samples
+        self.max_recurrence = max_recurrence
+
+    def run(self, window: AudioWindow, features: dict[str, Any]) -> SignalCheckResult:
+        series = _series(features.get("history", []), "T008", "dropout_event_count")
+        if len(series) < self.min_samples:
+            return self._result(0.0, CheckStatus.PASS, [])
+        arr = np.asarray(series, dtype=np.float64)
+        recurrence_ratio = float(np.count_nonzero(arr > 0.0)) / arr.size
+        if recurrence_ratio > self.max_recurrence:
+            return self._result(
+                recurrence_ratio, CheckStatus.WARNING,
+                [f"Dropout recurrence {recurrence_ratio:.2f} over recent windows"],
+            )
+        return self._result(recurrence_ratio, CheckStatus.PASS, [])
+
+    def _result(self, recurrence_ratio, status, diagnostics) -> SignalCheckResult:
+        return SignalCheckResult(
+            check_id=self.check_id, check_name=self.check_name, status=status,
+            measurements=[Measurement("recurrence_ratio", recurrence_ratio)],
+            diagnostic_messages=diagnostics,
+        )
