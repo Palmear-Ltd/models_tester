@@ -14,7 +14,7 @@ def test_compute_stats_basic():
 def test_calibration_profile_defaults():
     p = CalibrationProfile(profile_id="x")
     assert p.profile_id == "x"
-    assert p.version == 1
+    assert p.version == 2
     assert p.sample_rate == 44100
     assert p.statistics == {}
 
@@ -72,3 +72,54 @@ def test_save_load_round_trip(tmp_path):
     assert isinstance(rms, MeasurementStats)
     assert rms.count == profile.statistics["T002"]["rms"].count
     assert rms.mean == profile.statistics["T002"]["rms"].mean
+
+
+import numpy as np  # noqa: E402 (already imported above, but harmless)
+from app.health.calibration import (  # noqa: E402
+    CalibrationProfile, generate_profile, save_profile, load_profile,
+)
+from app.health.models import (  # noqa: E402
+    AudioWindow, Measurement, SignalCheckResult, CheckStatus, HealthReport, HealthState,
+)
+
+
+class _FakePipeline:
+    """Emits two correlated measurements per window so covariance is non-diagonal."""
+    def __init__(self):
+        self._i = 0
+
+    def analyze(self, window):
+        self._i += 1
+        a = float(self._i % 7)
+        b = a * 2.0 + 1.0  # perfectly correlated with a
+        res = SignalCheckResult(
+            check_id="T002", check_name="rms", status=CheckStatus.PASS, executed=True,
+            measurements=[Measurement("rms", a), Measurement("peak", b)],
+        )
+        return HealthReport(timestamp=0.0, window_id="x", check_results=[res],
+                            final_state=HealthState.OK)
+
+
+def test_generate_profile_stores_mean_and_covariance():
+    sig = np.zeros(int(44100 * 6.0), dtype=np.float32)  # 6 s -> several windows
+    profile = generate_profile([sig], 44100, profile_id="test_v2", pipeline=_FakePipeline())
+    assert profile.version == 2
+    assert [tuple(k) for k in profile.feature_index] == [("T002", "peak"), ("T002", "rms")] \
+        or [tuple(k) for k in profile.feature_index] == [("T002", "rms"), ("T002", "peak")]
+    D = len(profile.feature_index)
+    assert len(profile.mean_vector) == D
+    assert len(profile.covariance) == D and all(len(row) == D for row in profile.covariance)
+
+
+def test_profile_v2_round_trips(tmp_path):
+    sig = np.zeros(int(44100 * 6.0), dtype=np.float32)
+    profile = generate_profile([sig], 44100, profile_id="test_v2", pipeline=_FakePipeline())
+    path = tmp_path / "p.json"
+    save_profile(profile, str(path))
+    loaded = load_profile(str(path))
+    assert loaded.version == 2
+    assert loaded.feature_index == profile.feature_index
+    assert loaded.mean_vector == profile.mean_vector
+    assert loaded.covariance == profile.covariance
+    # statistics (used by calibration_eval) still present
+    assert "T002" in loaded.statistics
