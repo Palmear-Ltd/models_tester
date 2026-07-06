@@ -106,9 +106,9 @@ def build_manager(config: HealthConfig) -> SignalCheckManager:
     return manager
 
 
-def build_pipeline(config: HealthConfig, calibration_profile=None) -> HealthAnalysisPipeline:
+def build_pipeline(config: HealthConfig, calibration_profile=None, anomaly_p: float = 0.001) -> HealthAnalysisPipeline:
     return HealthAnalysisPipeline(
-        manager=build_manager(config), calibration_profile=calibration_profile
+        manager=build_manager(config), calibration_profile=calibration_profile, anomaly_p=anomaly_p
     )
 
 
@@ -140,5 +140,7 @@ def config_for_profile(name: str) -> HealthConfig:
     return configs[name]
 
 
-def pipeline_for_profile(name: str, calibration_profile=None) -> HealthAnalysisPipeline:
-    return build_pipeline(config_for_profile(name), calibration_profile=calibration_profile)
+def pipeline_for_profile(name: str, calibration_profile=None, anomaly_p: float = 0.001) -> HealthAnalysisPipeline:
+    return build_pipeline(
+        config_for_profile(name), calibration_profile=calibration_profile, anomaly_p=anomaly_p
+    )

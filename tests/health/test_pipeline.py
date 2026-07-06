@@ -115,6 +115,38 @@ def test_pipeline_populates_anomaly_and_confidence_with_profile():
     assert report.confidence == report.anomaly_result.confidence
 
 
+def test_pipeline_forwards_anomaly_p():
+    from app.health.pipeline import HealthAnalysisPipeline
+
+    class _M:
+        def __init__(self, n, v):
+            self.name = n
+            self.value = v
+
+    class _R:
+        def __init__(self, c, m):
+            self.check_id = c
+            self.measurements = m
+
+    class _P:
+        feature_index = [["C", "a"], ["C", "b"]]
+        mean_vector = [0.0, 0.0]
+        covariance = [[1.0, 0.0], [0.0, 1.0]]
+
+    results = [_R("C", [_M("a", 1.0), _M("b", 1.0)])]
+    strict = HealthAnalysisPipeline(calibration_profile=_P(), anomaly_p=0.001)._detect_anomalies({}, results)
+    loose = HealthAnalysisPipeline(calibration_profile=_P(), anomaly_p=0.5)._detect_anomalies({}, results)
+    # Smaller p -> larger chi-square critical value -> larger distance threshold.
+    assert strict.threshold > loose.threshold
+
+
+def test_pipeline_for_profile_forwards_anomaly_p():
+    from app.health.config import pipeline_for_profile
+
+    assert pipeline_for_profile("development").anomaly_p == 0.001
+    assert pipeline_for_profile("development", anomaly_p=0.05).anomaly_p == 0.05
+
+
 def test_pipeline_without_profile_has_no_anomaly():
     from app.health.config import pipeline_for_profile
 

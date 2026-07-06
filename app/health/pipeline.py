@@ -18,9 +18,10 @@ from app.health.models import AudioWindow, HealthReport
 
 
 class HealthAnalysisPipeline:
-    def __init__(self, manager: Optional[SignalCheckManager] = None, calibration_profile=None, history_length: int = 20):
+    def __init__(self, manager: Optional[SignalCheckManager] = None, calibration_profile=None, history_length: int = 20, anomaly_p: float = 0.001):
         self.manager = manager if manager is not None else SignalCheckManager()
         self.calibration_profile = calibration_profile
+        self.anomaly_p = anomaly_p
         self._history: deque = deque(maxlen=history_length)
 
     def analyze(self, window: AudioWindow) -> HealthReport:
@@ -71,4 +72,4 @@ class HealthAnalysisPipeline:
             return None
         from app.health.anomaly import detect_anomaly
 
-        return detect_anomaly(results, self.calibration_profile)
+        return detect_anomaly(results, self.calibration_profile, p=self.anomaly_p)

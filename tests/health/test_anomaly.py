@@ -30,6 +30,18 @@ def _profile():
     )
 
 
+def test_returns_none_on_dimension_mismatch():
+    # A malformed profile (mean vector shorter than the feature index) must be
+    # rejected as a no-op, not raise IndexError into the audio path.
+    profile = _Profile(
+        feature_index=[["C", "a"], ["C", "b"]],
+        mean_vector=[0.0],                      # length 1, but D=2
+        covariance=[[1.0, 0.0], [0.0, 1.0]],
+    )
+    results = [_R("C", [_M("a", 1.0), _M("b", 1.0)])]
+    assert detect_anomaly(results, profile) is None
+
+
 def test_at_mean_is_not_anomalous():
     results = [_R("T002", [_M("rms", 0.2)]), _R("F001", [_M("spectral_centroid", 1000.0)])]
     r = detect_anomaly(results, _profile())

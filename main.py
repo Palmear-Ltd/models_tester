@@ -712,16 +712,24 @@ class ModelsTesterApp:
         self.log("Validating acquisition over the next ~20 s ...")
 
     def _write_report(self, kind, payload):
-        """Write a health report dict to reports/<kind>_<timestamp>.json (best-effort)."""
-        try:
-            os.makedirs("reports", exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            path = os.path.join("reports", f"{kind}_{ts}.json")
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2)
-            self.log(f"[report] wrote {path}")
-        except Exception as e:
-            self.log(f"[report] write error: {e}")
+        """Persist a health report dict to reports/<kind>_<timestamp>.json.
+
+        The actual file I/O runs on a daemon thread so it never blocks the audio
+        callback thread that triggers it (best-effort; failures are logged only).
+        """
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+        def _do_write():
+            try:
+                os.makedirs("reports", exist_ok=True)
+                path = os.path.join("reports", f"{kind}_{ts}.json")
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2)
+                self.log(f"[report] wrote {path}")
+            except Exception as e:
+                self.log(f"[report] write error: {e}")
+
+        threading.Thread(target=_do_write, daemon=True).start()
 
     def _show_validation_result(self):
         result = run_validation(

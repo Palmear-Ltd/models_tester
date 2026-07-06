@@ -34,6 +34,12 @@ def detect_anomaly(results, profile, *, p: float = 0.001):
     if not feature_index or not mean_vector or not covariance:
         return None  # no covariance model (e.g. v1 profile) -> unchanged behavior
 
+    # Reject a malformed profile (mismatched dimensions) as a no-op rather than
+    # letting the later index/matrix ops raise into the additive health path.
+    dim = len(feature_index)
+    if len(mean_vector) != dim or len(covariance) != dim:
+        return None
+
     # Map this window's measurements by (check_id, name).
     value_by_key = {}
     for result in results:
@@ -67,7 +73,11 @@ def detect_anomaly(results, profile, *, p: float = 0.001):
     except np.linalg.LinAlgError:
         sol = np.linalg.pinv(cov) @ diff
 
-    per_dim = diff * sol  # each dim's contribution to d^2
+    # Signed per-dimension contribution to d^2. For correlated features an
+    # individual term can be negative (the dimension pulls against the
+    # correlation) even though the total d^2 is non-negative; the sign is
+    # meaningful, and contributors are ranked by magnitude below.
+    per_dim = diff * sol
     d2 = float(max(0.0, np.sum(per_dim)))
     distance = float(np.sqrt(d2))
 
