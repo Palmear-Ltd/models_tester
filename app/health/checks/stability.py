@@ -1,4 +1,5 @@
-"""Stability Signal Health Checks (spec §4.10, S001–S003).
+"""Stability Signal Health Checks (spec §4.10, S001–S003; S004 adds dropout
+recurrence confirmation, reading T008's per-window measurement).
 
 These read the pipeline's per-window measurement history from
 ``features["history"]`` — a list of ``{check_id: {measurement_name: value}}``
