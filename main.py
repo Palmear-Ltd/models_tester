@@ -761,8 +761,8 @@ class ModelsTesterApp:
         anomaly = report.anomaly_result
         anomalous = anomaly is not None and anomaly.is_anomalous
         if anomalous and not self._last_anomalous:
-            top_label, top_z = anomaly.contributors[0] if anomaly.contributors else ("", 0.0)
-            self.log(f"[anomaly] distance {anomaly.distance:.1f} — {top_label} z={top_z:.1f}")
+            top_label, top_c = anomaly.contributors[0] if anomaly.contributors else ("", 0.0)
+            self.log(f"[anomaly] distance {anomaly.distance:.1f} — {top_label} contrib={top_c:.1f}")
             source = "wav" if self.input_type_var.get() == "file" else "mic"
             ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             self._write_report("anomaly", anomaly_event_to_dict(anomaly, source=source, timestamp=ts))
