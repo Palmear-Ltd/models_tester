@@ -21,9 +21,11 @@ from app.health.checks.frequency_domain import (
     SpectralShapeCheck,
 )
 from app.health.checks.time_domain import (
+    ClickTransientCheck,
     ClippingCheck,
     CrestFactorCheck,
     DCOffsetCheck,
+    DropoutSegmentCheck,
     FlatlineCheck,
     PeakAmplitudeCheck,
     SignalEnergyCheck,
@@ -58,6 +60,8 @@ REGISTRY: list[CheckSpec] = [
     CheckSpec("T005", CrestFactorCheck, "time_domain"),
     CheckSpec("T006", DCOffsetCheck, "time_domain"),
     CheckSpec("T007", ZeroCrossingRateCheck, "time_domain"),
+    CheckSpec("T008", DropoutSegmentCheck, "time_domain"),
+    CheckSpec("T009", ClickTransientCheck, "time_domain"),
     CheckSpec("F001", SpectralShapeCheck, "frequency_domain"),
     CheckSpec("F002", SpectralFlatnessCheck, "frequency_domain"),
     CheckSpec("F003", BandEnergyDistributionCheck, "frequency_domain"),
