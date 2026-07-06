@@ -1,4 +1,5 @@
-"""Time-domain Signal Health Checks (spec §4.8, T001–T007).
+"""Time-domain Signal Health Checks (spec §4.8, T001–T007; T008–T009 add cable-fault
+transient detection).
 
 Each check operates directly on the waveform (NumPy only) and reports a status
 plus measurements. Thresholds are provisional manual defaults; Phase 3 replaces
