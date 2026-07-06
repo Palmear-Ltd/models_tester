@@ -100,16 +100,22 @@ class SettingsDialog:
         ttk.Label(tab, text="Up Cut (Hz):").grid(row=2, column=0, sticky="w", pady=5)
         ttk.Entry(tab, textvariable=app.up_cut_var, width=15).grid(row=2, column=1, sticky="w", padx=5)
 
-        ttk.Label(tab, text="FFT Win Size (s):").grid(row=3, column=0, sticky="w", pady=5)
-        ttk.Entry(tab, textvariable=app.sub_win_size_var, width=15).grid(row=3, column=1, sticky="w", padx=5)
+        ttk.Label(tab, text="Mel fmin (Hz):").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Entry(tab, textvariable=app.fmin_var, width=15).grid(row=3, column=1, sticky="w", padx=5)
 
-        ttk.Label(tab, text="Hop Size (s):").grid(row=4, column=0, sticky="w", pady=5)
-        ttk.Entry(tab, textvariable=app.sub_hop_size_var, width=15).grid(row=4, column=1, sticky="w", padx=5)
+        ttk.Label(tab, text="Mel fmax (Hz):").grid(row=4, column=0, sticky="w", pady=5)
+        ttk.Entry(tab, textvariable=app.fmax_var, width=15).grid(row=4, column=1, sticky="w", padx=5)
 
-        ttk.Label(tab, text="Mel Bands:").grid(row=5, column=0, sticky="w", pady=5)
-        ttk.Entry(tab, textvariable=app.n_mels_var, width=15).grid(row=5, column=1, sticky="w", padx=5)
+        ttk.Label(tab, text="FFT Win Size (s):").grid(row=5, column=0, sticky="w", pady=5)
+        ttk.Entry(tab, textvariable=app.sub_win_size_var, width=15).grid(row=5, column=1, sticky="w", padx=5)
+
+        ttk.Label(tab, text="Hop Size (s):").grid(row=6, column=0, sticky="w", pady=5)
+        ttk.Entry(tab, textvariable=app.sub_hop_size_var, width=15).grid(row=6, column=1, sticky="w", padx=5)
+
+        ttk.Label(tab, text="Mel Bands:").grid(row=7, column=0, sticky="w", pady=5)
+        ttk.Entry(tab, textvariable=app.n_mels_var, width=15).grid(row=7, column=1, sticky="w", padx=5)
 
         # Sequence length does not apply to a one-shot model.
         if not getattr(app, "is_one_shot_model", False):
-            ttk.Label(tab, text="Seq Len (frames):").grid(row=6, column=0, sticky="w", pady=5)
-            ttk.Entry(tab, textvariable=app.seq_len_var, width=15).grid(row=6, column=1, sticky="w", padx=5)
+            ttk.Label(tab, text="Seq Len (frames):").grid(row=8, column=0, sticky="w", pady=5)
+            ttk.Entry(tab, textvariable=app.seq_len_var, width=15).grid(row=8, column=1, sticky="w", padx=5)

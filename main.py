@@ -70,6 +70,8 @@ class ModelsTesterApp:
         self.low_cut_var = tk.DoubleVar(value=500.0)
         self.up_cut_var = tk.DoubleVar(value=8000.0)
         self.sub_win_size_var = tk.DoubleVar(value=0.05)
+        self.fmin_var = tk.DoubleVar(value=50.0)
+        self.fmax_var = tk.DoubleVar(value=10000.0)
         self.sub_hop_size_var = tk.DoubleVar(value=0.025)
         self.n_mels_var = tk.IntVar(value=32)
         self.seq_len_var = tk.IntVar(value=98)
@@ -856,6 +858,8 @@ class ModelsTesterApp:
                 "seq_len": self.seq_len_var.get(),
                 "low_cut": self.low_cut_var.get(),
                 "up_cut": self.up_cut_var.get(),
+                "fmin": self.fmin_var.get(),
+                "fmax": self.fmax_var.get(),
                 "sub_win_size": self.sub_win_size_var.get(),
                 "sub_hop_size": self.sub_hop_size_var.get(),
                 "save_results_enabled": self.save_results_var.get(),
@@ -885,12 +889,14 @@ class ModelsTesterApp:
             
             # 1. Extract Features with Config
             specs = self.processor.extract_features(
-                audio_data, 
+                audio_data,
                 sr=44100,
                 n_mels=self.model_n_mels,
                 seq_len=self.model_seq_len,
                 low_cut=self.low_cut_var.get(),
                 up_cut=self.up_cut_var.get(),
+                fmin=self.fmin_var.get(),
+                fmax=self.fmax_var.get(),
                 sub_win_size_sec=self.sub_win_size_var.get(),
                 sub_hop_size_sec=self.sub_hop_size_var.get(),
                 use_filter=self.use_filter_var.get()

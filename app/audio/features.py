@@ -21,8 +21,7 @@ class FeatureExtractor:
     def __init__(self):
         self.processor = AudioProcessor()
     
-    #TODO: maybe add and wire fmin and fmax in the settings UI window
-    def extract_features(self, audio_data, sr=44100, n_mels=32, 
+    def extract_features(self, audio_data, sr=44100, n_mels=32,
                          low_cut=500.0, up_cut=8000.0, fmin=50,fmax=10000,
                          sub_win_size_sec=0.05, sub_hop_size_sec=0.025,
                          use_filter=True, seq_len=98, enable_downsample=False, 
