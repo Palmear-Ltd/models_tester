@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 
 from app.health.checks.frequency_domain import (
     ElectricalHumCheck,
@@ -54,10 +53,11 @@ def _measure(result, name):
 
 
 def test_harmonic_resonance_passes_on_clean_sine_tone():
-    # A single, undistorted tone concentrates virtually all spectral energy in
-    # one narrowband peak (resonance_score ~1.0 is inherent to *any* isolated
-    # tone, not a distortion signature) but carries ~zero harmonic content, so
-    # only thd_ratio (near 0) should drive the status here.
+    # F005 is measurement-only (always PASS, see class docstring): validation
+    # against the real labeled corpus (test_data/audio_signal_health/) found
+    # it fired *less* on real broken-mic recordings than on normal ones when
+    # it gated status, so the owner demoted it permanently. This test just
+    # confirms the thd_ratio measurement stays low for an undistorted tone.
     check = HarmonicResonanceCheck()
     assert check.category is CheckCategory.PRIMARY
     x = _sine(1000.0)
@@ -66,44 +66,51 @@ def test_harmonic_resonance_passes_on_clean_sine_tone():
     assert _measure(result, "thd_ratio") < 0.05
 
 
-def test_harmonic_resonance_warns_on_nonlinear_distortion():
+def test_harmonic_resonance_measures_elevated_thd_on_nonlinear_distortion():
     # A quadratic (second-harmonic) nonlinearity is the standard textbook model
     # of asymmetric analog distortion (e.g. a damaged capsule ringing without
     # hard-clipping). A symmetric tanh soft-clip was tried first and rejected:
     # it only produces odd harmonics, which plateau at thd_ratio ~0.15
     # (limited further by harmonic_count=5 only reaching the 3rd/5th) no
-    # matter how hard it's driven -- it can never clear max_thd_warn=0.5. This
-    # quadratic fixture reliably lands around thd_ratio ~0.8.
+    # matter how hard it's driven. This quadratic fixture reliably lands
+    # around thd_ratio ~0.8 -- status is always PASS (measurement-only), but
+    # the elevated thd_ratio measurement is still expected to show through.
     x = _sine(1000.0, amp=1.0)
     y = x + 1.8 * x**2
     y = y - y.mean()
     result = HarmonicResonanceCheck().run(_win(y), _feats(y))
-    assert result.status in (CheckStatus.WARNING, CheckStatus.FAIL)
+    assert result.status is CheckStatus.PASS
     assert _measure(result, "thd_ratio") > 0.5
 
 
 def test_harmonic_resonance_passes_while_electrical_hum_warns_on_same_signal():
-    # F004 and F005 must stay self-disambiguating: a pure mains-hum signal
-    # (60/120/180 Hz, no other tonal content) should fire F004 only. F005's
-    # candidate band excludes 60 Hz (below f0_min=80) and masks out the 120/180
-    # Hz hum harmonics via hum_exclusion_bw, leaving no real candidate peak.
+    # F005 always PASSes now (measurement-only), but this is still a useful
+    # regression: F004 and F005 stay self-disambiguating on a pure mains-hum
+    # signal (60/120/180 Hz, no other tonal content) -- F004 WARNs on it,
+    # while F005's candidate band excludes 60 Hz (below f0_min=80) and masks
+    # out the 120/180 Hz hum harmonics via hum_exclusion_bw, leaving no real
+    # candidate peak, so its measurements stay near-zero rather than crashing
+    # or reporting something misleading.
     x = _sine(60.0, amp=0.3) + _sine(120.0, amp=0.2) + _sine(180.0, amp=0.1)
     hum_result = ElectricalHumCheck(fundamental_frequency=60.0).run(_win(x), _feats(x))
     resonance_result = HarmonicResonanceCheck().run(_win(x), _feats(x))
     assert hum_result.status is CheckStatus.WARNING
     assert resonance_result.status is CheckStatus.PASS
+    assert _measure(resonance_result, "thd_ratio") < 1e-6
 
 
 def test_harmonic_resonance_passes_on_broadband_noise():
-    # False-positive guard: broadband noise has no discernible tone. This is
-    # the check's prominence_k=50 default at work -- see the class docstring
-    # for why 50 (not a naive "3x") is needed: f0 is chosen via argmax over
-    # ~9,800 candidate bins, so by extreme-value statistics the tallest of
-    # that many roughly-i.i.d. noise bins sits many multiples above a narrow
-    # local median even with no real tone present.
+    # Broadband noise has no discernible tone. This is the check's
+    # prominence_k=50 default at work -- see the class docstring for why 50
+    # (not a naive "3x") is needed: f0 is chosen via argmax over ~9,800
+    # candidate bins, so by extreme-value statistics the tallest of that many
+    # roughly-i.i.d. noise bins sits many multiples above a narrow local
+    # median even with no real tone present. Status is always PASS
+    # (measurement-only); thd_ratio should still stay at 0 here.
     noise = RNG.normal(size=N)
     result = HarmonicResonanceCheck().run(_win(noise), _feats(noise))
     assert result.status is CheckStatus.PASS
+    assert _measure(result, "thd_ratio") == 0.0
 
 
 def test_harmonic_resonance_passes_on_silence():
@@ -123,26 +130,16 @@ def test_harmonic_resonance_passes_on_non_finite_input():
     assert result.status is CheckStatus.PASS
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known limitation (code review finding, see cm-task-2-report.md 'Deviation 4'): "
-        "local_floor is a whole-candidate-band median (~9,800 bins from 80-4000Hz minus "
-        "hum, minus the peak's own window), not a genuinely local neighborhood around f0. "
-        "That whole-band reference is deliberate -- prominence_k=50's extreme-value "
-        "argument only holds if the reference population is the same set of bins argmax "
-        "was drawn from -- but it means a non-flat (e.g. pink/1-over-f) noise floor drags "
-        "the whole-band median down relative to the naturally louder low-frequency bins, "
-        "so the loudest low-frequency bin looks artificially 'prominent' against that "
-        "depressed floor. Confirmed on 10 independent pink-noise seeds: all 10 produced "
-        "WARNING or FAIL, none PASSed, on fault-free content. This test pins one "
-        "deterministic seed so an eventual fix (a genuinely local floor, or a "
-        "frequency-dependent one) shows up as an unexpected XPASS rather than silently "
-        "landing unnoticed."
-    ),
-)
-def test_harmonic_resonance_false_positives_on_pink_noise_floor():
+def test_harmonic_resonance_passes_on_pink_noise_floor():
+    # F005 is permanently measurement-only (see class docstring): real-corpus
+    # validation showed it fired *less* on genuine broken-mic recordings than
+    # on normal ones when it gated status, so status gating was removed
+    # entirely rather than chasing threshold tuning against non-flat
+    # real-world spectra. This test (previously an xfail pinned to a known
+    # local_floor false-positive on non-flat/pink noise) now just confirms
+    # F005 still runs cleanly -- without crashing and without misleading
+    # status -- on a non-flat (1/f) noise floor, which the flat white/uniform
+    # noise fixture above doesn't exercise.
     pink = _pink_noise(seed=0)
     result = HarmonicResonanceCheck().run(_win(pink), _feats(pink))
-    # Fault-free realistic content should PASS; today it doesn't.
     assert result.status is CheckStatus.PASS

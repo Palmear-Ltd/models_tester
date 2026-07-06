@@ -1,5 +1,5 @@
 """Frequency-domain Signal Health Checks (spec §4.9, F001–F004; F005 adds
-harmonic/resonance distortion detection).
+harmonic/resonance distortion measurement, measurement-only like F003).
 
 Each check consumes the shared spectrum from feature preparation
 (`features["power_spectrum"]`, `features["freqs"]`) and never recomputes an FFT.
@@ -245,26 +245,26 @@ class ElectricalHumCheck(SignalHealthCheck):
 class HarmonicResonanceCheck(SignalHealthCheck):
     """F005 — a THD-style measurement adapted for non-tonal acoustic content.
 
-    Catches nonlinear distortion / mechanical resonance from a damaged capsule
-    that F001 (SpectralShapeCheck) and T004 (ClippingCheck) only weakly catch:
-    F001's centroid/bandwidth moments are insensitive to a single narrow
-    spectral spike buried in broadband content, and T004 only sees hard
-    digital saturation, not a resonant capsule that rings without clipping.
+    Measurement-only (always PASS): it characterises how much of a candidate
+    tonal peak's energy reappears at integer multiples of its fundamental
+    (thd_ratio) and how much of all spectral energy that peak occupies
+    (resonance_score), for the panel and for calibration. It does not gate
+    status. This was validated against the real labeled corpus at
+    test_data/audio_signal_health/ (broken_mic/ vs chinese_needle_1/,
+    sanded_needle_1/) and found to fire *less* on real broken-mic recordings
+    (1.6% non-PASS) than on normal recordings (15-28% non-PASS) when it did
+    gate status -- backwards from what a fault check needs, not just a
+    synthetic edge case (see the pink-noise false-positive finding this
+    superseded). The owner decided to demote it to measurement-only
+    permanently rather than keep tuning thresholds against real-world
+    acoustic content that doesn't match the synthetic assumptions the check
+    was built against.
 
     Finds the most prominent tonal peak in an 80-4000 Hz candidate band
     (excluding mains-hum bins, so F004 and F005 stay self-disambiguating: a
     pure mains-hum signal fires F004 only, a damaged-capsule harmonic series
     at a non-mains fundamental fires F005 only) and measures how much of its
     energy reappears at integer multiples of that fundamental (thd_ratio).
-
-    Only ``thd_ratio`` drives status (WARNING/FAIL). ``resonance_score``
-    (the fraction of *all* spectral energy sitting in that one narrowband
-    peak) is reported as a measurement only and does not gate status: any
-    isolated, undistorted tone inherently drives resonance_score toward 1.0
-    (that's what "all the energy is at one frequency" means), so gating on it
-    would false-positive on a legitimately strong clean tone. thd_ratio does
-    not share that problem -- an undistorted tone has ~zero energy at its
-    harmonics regardless of how much of the total spectrum it occupies.
 
     ``prominence_k`` defaults to 50 (not a naive "3x local floor"): the
     candidate fundamental is chosen via `argmax` over a wide search band
@@ -276,8 +276,9 @@ class HarmonicResonanceCheck(SignalHealthCheck):
     property, so the bar has to absorb "the tallest of ~9,800 draws," not
     just be "higher than typical single-bin noise." Empirically validated
     against 23 independent broadband-noise realizations (both Gaussian and
-    uniform) at this window size: prominence_k=50 reliably PASSes all of
-    them while still catching real distortion.
+    uniform) at this window size: prominence_k=50 reliably keeps thd_ratio
+    near 0 for all of them. Still used to compute thd_ratio/resonance_score
+    even though neither gates status anymore.
     """
 
     check_id = "F005"
@@ -292,8 +293,6 @@ class HarmonicResonanceCheck(SignalHealthCheck):
         prominence_k: float = 50.0,
         harmonic_count: int = 5,
         analysis_bandwidth: float = 2.0,
-        max_thd_warn: float = 0.5,
-        max_thd_fault: float = 1.0,
     ):
         self.f0_min = f0_min
         self.f0_max = f0_max
@@ -301,13 +300,11 @@ class HarmonicResonanceCheck(SignalHealthCheck):
         self.prominence_k = prominence_k
         self.harmonic_count = harmonic_count
         self.analysis_bandwidth = analysis_bandwidth
-        self.max_thd_warn = max_thd_warn
-        self.max_thd_fault = max_thd_fault
 
     def run(self, window: AudioWindow, features: dict[str, Any]) -> SignalCheckResult:
         spec = _usable_spectrum(features)
         if spec is None:
-            return self._result(0.0, 0.0, CheckStatus.PASS, [])
+            return self._result(0.0, 0.0)
         freqs, power, total = spec
 
         hum_mask = np.zeros_like(freqs, dtype=bool)
@@ -318,7 +315,7 @@ class HarmonicResonanceCheck(SignalHealthCheck):
         if not np.any(band) or float(power[band].max()) <= 0.0:
             # No discernible tone in the candidate band -- normal for
             # broadband insect/noise content, not a fault.
-            return self._result(0.0, 0.0, CheckStatus.PASS, [])
+            return self._result(0.0, 0.0)
 
         band_freqs = freqs[band]
         band_power = power[band]
@@ -333,8 +330,8 @@ class HarmonicResonanceCheck(SignalHealthCheck):
 
         if fundamental_energy < self.prominence_k * local_floor:
             # The peak isn't prominent enough above the local floor to be a
-            # real tone -- just noise texture, avoid a false positive.
-            return self._result(0.0, fundamental_energy / total, CheckStatus.PASS, [])
+            # real tone -- just noise texture.
+            return self._result(0.0, fundamental_energy / total)
 
         nyquist = features["sample_rate"] / 2.0
         harmonic_energy = 0.0
@@ -350,31 +347,15 @@ class HarmonicResonanceCheck(SignalHealthCheck):
         thd_ratio = harmonic_energy / fundamental_energy if fundamental_energy > 0 else 0.0
         resonance_score = fundamental_energy / total
 
-        diagnostics = []
-        if thd_ratio > self.max_thd_fault:
-            status = CheckStatus.FAIL
-            diagnostics.append(
-                f"Harmonic distortion ratio {thd_ratio:.2f} around {f0:.0f} Hz indicates "
-                "nonlinear resonance/distortion"
-            )
-        elif thd_ratio > self.max_thd_warn:
-            status = CheckStatus.WARNING
-            diagnostics.append(
-                f"Harmonic distortion ratio {thd_ratio:.2f} around {f0:.0f} Hz elevated"
-            )
-        else:
-            status = CheckStatus.PASS
+        return self._result(thd_ratio, resonance_score)
 
-        return self._result(thd_ratio, resonance_score, status, diagnostics)
-
-    def _result(self, thd_ratio, resonance_score, status, diagnostics) -> SignalCheckResult:
+    def _result(self, thd_ratio, resonance_score) -> SignalCheckResult:
         return SignalCheckResult(
             check_id=self.check_id,
             check_name=self.check_name,
-            status=status,
+            status=CheckStatus.PASS,
             measurements=[
                 Measurement("thd_ratio", thd_ratio),
                 Measurement("resonance_score", resonance_score),
             ],
-            diagnostic_messages=diagnostics,
         )
