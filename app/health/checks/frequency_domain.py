@@ -325,6 +325,14 @@ class HarmonicResonanceCheck(SignalHealthCheck):
         peak_mask = np.abs(freqs - f0) <= self.analysis_bandwidth
         fundamental_energy = float(power[peak_mask].sum())
 
+        # "Local floor" is a whole-candidate-band median, not a narrow neighborhood
+        # around f0 -- deliberate: prominence_k's extreme-value-statistics rationale
+        # (above) only holds if the reference population is the same ~thousands of
+        # bins argmax was drawn from. Consequence: thd_ratio/resonance_score read
+        # misleadingly high on non-flat (e.g. pink/1-over-f) noise floors, confirmed
+        # via synthetic pink-noise seeds. Doesn't affect status (always PASS), but
+        # matters if a future calibration/root-cause task treats these measurements
+        # as comparable across differently-shaped noise floors.
         local_mask = band & ~peak_mask
         local_floor = float(np.median(power[local_mask])) if np.any(local_mask) else 0.0
 
