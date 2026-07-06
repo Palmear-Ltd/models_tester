@@ -22,6 +22,7 @@ from app.health.models import AudioWindow, HealthState
 from app.health.reporting import report_rows
 from app.health.monitoring import RuntimeMonitor
 from app.health.startup import StartupDecision, run_validation
+from app.health.serialization import startup_result_to_dict, anomaly_event_to_dict
 from app.ui import SettingsDialog
 
 SAMPLE_RATE = 44100  # acquisition sample rate (Hz); the whole pipeline runs at this rate
@@ -710,6 +711,18 @@ class ModelsTesterApp:
         self._validating = True
         self.log("Validating acquisition over the next ~20 s ...")
 
+    def _write_report(self, kind, payload):
+        """Write a health report dict to reports/<kind>_<timestamp>.json (best-effort)."""
+        try:
+            os.makedirs("reports", exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            path = os.path.join("reports", f"{kind}_{ts}.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            self.log(f"[report] wrote {path}")
+        except Exception as e:
+            self.log(f"[report] write error: {e}")
+
     def _show_validation_result(self):
         result = run_validation(
             self._validation_reports,
@@ -718,6 +731,7 @@ class ModelsTesterApp:
             calibration_loaded=self.calibration_profile is not None,
         )
         self.log(f"[validation] {result.summary}")
+        self._write_report("startup", startup_result_to_dict(result))
         show = {
             StartupDecision.PASS: messagebox.showinfo,
             StartupDecision.WARNING: messagebox.showwarning,
@@ -749,6 +763,9 @@ class ModelsTesterApp:
         if anomalous and not self._last_anomalous:
             top_label, top_z = anomaly.contributors[0] if anomaly.contributors else ("", 0.0)
             self.log(f"[anomaly] distance {anomaly.distance:.1f} — {top_label} z={top_z:.1f}")
+            source = "wav" if self.input_type_var.get() == "file" else "mic"
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            self._write_report("anomaly", anomaly_event_to_dict(anomaly, source=source, timestamp=ts))
         self._last_anomalous = anomalous
         self._update_health_panel(report)
 

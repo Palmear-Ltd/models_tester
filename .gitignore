@@ -32,3 +32,4 @@ models/*/output/
 .omc
 test_data/archive/
 test_data/audio_signal_health
+reports/
