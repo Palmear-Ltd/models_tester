@@ -31,7 +31,7 @@ Deferred (noted in specs): persisting startup/anomaly reports; full-covariance M
 
 ## Workflow
 
-- **The owner commits and pushes MANUALLY** after reviewing/testing each phase. **Do NOT run `git add`/`commit`/`push`** — leave changes in the working tree. Plans omit commit steps; tell subagents the same.
+- **Claude MAY commit locally** (per task/phase) — commit messages carry **NO `Co-Authored-By` trailer**. **Pushing and merging to `main` stay the owner's call.** (Superseded the old "owner commits everything manually / never `git add`" rule on 2026-07-06.)
 - Build features through superpowers: **brainstorming → writing-plans → subagent-driven-development** (the owner consistently picks subagent-driven). Use **systematic-debugging** for bugs. TDD throughout (synthetic signals: silence, sine, noise, clipped, DC-offset, hum).
 - Specs → `docs/superpowers/specs/YYYY-MM-DD-*.md`; plans → `docs/superpowers/plans/`.
 - Big features ship in sub-phases (a/b/c): headless engine first, then UI. Each sub-phase leaves the tester working + one visible feature.
