@@ -1,4 +1,4 @@
-"""Tests for app/health/rootcause.py — root-cause attribution (plan sub-phase 8c).
+"""Tests for app/health/rootcause.py — sensor-link fault attribution.
 
 Constructs SignalCheckResult objects directly for unit-level scoring tests (no
 pipeline needed), plus one integration-style test against a real
@@ -15,7 +15,7 @@ from app.health.models import (
     SignalCheckResult,
 )
 from app.health.rootcause import (
-    DEFAULT_TIE_MARGIN,
+    MAX_SCORE,
     RootCause,
     RootCauseAssessment,
     assess,
@@ -35,12 +35,8 @@ def _result(check_id, status, measurements=None, executed=True, diagnostic_messa
     )
 
 
-def _t002(status, rms):
-    return _result("T002", status, measurements=[Measurement("rms", rms)])
-
-
 # ---------------------------------------------------------------------------
-# Basic bucket attribution
+# Basic attribution
 # ---------------------------------------------------------------------------
 
 
@@ -56,87 +52,71 @@ def test_all_pass_results_yield_none():
     assert outcome.contributing_check_ids == []
 
 
-def test_t001_fail_alone_is_cable():
+def test_t001_fail_alone_is_sensor_link():
     results = [_result("T001", CheckStatus.FAIL)]
     outcome = assess_results(results)
-    assert outcome.primary_cause is RootCause.CABLE
+    assert outcome.primary_cause is RootCause.SENSOR_LINK
     assert "T001" in outcome.contributing_check_ids
 
 
-def test_s002_warning_alone_is_microphone():
-    # F005 can no longer serve as this example: it's permanently measurement-only
-    # (demoted after real-corpus validation showed it fires backwards) and never
-    # produces a non-PASS SignalCheckResult, so S002 (spectral centroid drift)
-    # stands in as the "MICROPHONE alone" case instead.
-    results = [_result("S002", CheckStatus.WARNING)]
+def test_t008_warning_alone_is_sensor_link():
+    results = [_result("T008", CheckStatus.WARNING)]
     outcome = assess_results(results)
-    assert outcome.primary_cause is RootCause.MICROPHONE
-    assert "S002" in outcome.contributing_check_ids
+    assert outcome.primary_cause is RootCause.SENSOR_LINK
+    assert "T008" in outcome.contributing_check_ids
 
 
-def test_f004_warning_alone_is_environment():
-    results = [_result("F004", CheckStatus.WARNING)]
-    outcome = assess_results(results)
-    assert outcome.primary_cause is RootCause.ENVIRONMENT
-    assert "F004" in outcome.contributing_check_ids
-
-
-def test_t009_fail_alone_is_multiple_by_construction():
-    # T009 splits evenly across CABLE (+2) and MICROPHONE (+2): a lone T009 FAIL
-    # is an exact tie by construction, and is the natural (not artificially
-    # engineered) example of MULTIPLE described in the task brief.
+def test_t009_fail_alone_is_sensor_link():
     results = [_result("T009", CheckStatus.FAIL)]
     outcome = assess_results(results)
-    assert outcome.primary_cause is RootCause.MULTIPLE
-    explanation = outcome.explanation.lower()
-    assert "cable" in explanation
-    assert "microphone" in explanation
+    assert outcome.primary_cause is RootCause.SENSOR_LINK
+    assert "T009" in outcome.contributing_check_ids
 
 
-def test_t008_fail_plus_t009_fail_resolves_to_cable_not_multiple():
-    # T008 FAIL: CABLE +3. T009 FAIL: CABLE +2, MICROPHONE +2.
-    # Total CABLE=5, MICROPHONE=2 -> runner-up/top gap = (5-2)/5 = 0.6, which is
-    # outside the default 0.34 tie margin, so this resolves to CABLE.
+def test_s004_warning_alone_is_sensor_link():
+    results = [_result("S004", CheckStatus.WARNING)]
+    outcome = assess_results(results)
+    assert outcome.primary_cause is RootCause.SENSOR_LINK
+    assert "S004" in outcome.contributing_check_ids
+
+
+def test_checks_unrelated_to_sensor_link_do_not_contribute():
+    # T002 (energy), T004 (clipping), T006 (DC offset), F004 (hum), S002/S003
+    # (spectral drift/noise floor) are about loudness/environment/general
+    # microphone aging, not a sensor-link fault -- none should score.
+    results = [
+        _result("T002", CheckStatus.FAIL, measurements=[Measurement("rms", 0.95)]),
+        _result("T004", CheckStatus.FAIL),
+        _result("T006", CheckStatus.FAIL),
+        _result("F004", CheckStatus.WARNING),
+        _result("S002", CheckStatus.WARNING),
+        _result("S003", CheckStatus.WARNING),
+    ]
+    outcome = assess_results(results)
+    assert outcome.primary_cause is RootCause.UNKNOWN
+    assert outcome.contributing_check_ids == []
+
+
+def test_t008_fail_plus_t009_fail_is_additive():
+    # T008 FAIL contributes 3.0, T009 FAIL contributes 2.0 -- combined score
+    # (and therefore confidence) must be strictly higher than either alone.
     t008_alone = assess_results([_result("T008", CheckStatus.FAIL)])
     combined = assess_results(
         [_result("T008", CheckStatus.FAIL), _result("T009", CheckStatus.FAIL)]
     )
-    assert t008_alone.primary_cause is RootCause.CABLE
-    assert combined.primary_cause is RootCause.CABLE
-    # Additivity: the CABLE score (and therefore confidence) with T009 also
-    # firing must be strictly higher than T008 alone.
+    assert t008_alone.primary_cause is RootCause.SENSOR_LINK
+    assert combined.primary_cause is RootCause.SENSOR_LINK
     assert combined.confidence > t008_alone.confidence
-    cable_score_alone = next(s for c, s, _ in t008_alone.ranked_causes if c is RootCause.CABLE)
-    cable_score_combined = next(s for c, s, _ in combined.ranked_causes if c is RootCause.CABLE)
-    assert cable_score_combined > cable_score_alone
+    assert set(combined.contributing_check_ids) == {"T008", "T009"}
 
 
-def test_t002_fail_direction_dependent_cable_vs_environment():
-    low = assess_results([_t002(CheckStatus.FAIL, rms=1e-5)])
-    high = assess_results([_t002(CheckStatus.FAIL, rms=0.95)])
-    assert low.primary_cause is RootCause.CABLE
-    assert high.primary_cause is RootCause.ENVIRONMENT
-
-
-def test_t004_fail_joint_rule_microphone_vs_environment():
-    mic = assess_results(
-        [
-            _result("T004", CheckStatus.FAIL),
-            _t002(CheckStatus.PASS, rms=0.05),
-        ]
-    )
-    env = assess_results(
-        [
-            _result("T004", CheckStatus.FAIL),
-            _t002(CheckStatus.FAIL, rms=0.95),
-        ]
-    )
-    assert mic.primary_cause is RootCause.MICROPHONE
-    assert env.primary_cause is RootCause.ENVIRONMENT
+def test_confidence_is_score_over_max_score():
+    outcome = assess_results([_result("T001", CheckStatus.FAIL)])
+    assert outcome.confidence == 4.0 / MAX_SCORE
 
 
 def test_unmapped_non_pass_result_yields_unknown():
-    # T007 is explicitly excluded from the scoring table.
+    # T007 is not in the sensor-link weight table.
     results = [_result("T007", CheckStatus.WARNING)]
     outcome = assess_results(results)
     assert outcome.primary_cause is RootCause.UNKNOWN
@@ -177,7 +157,6 @@ def test_calibration_and_anomaly_never_change_score_only_explanation():
 
     assert augmented.primary_cause is plain.primary_cause
     assert augmented.confidence == plain.confidence
-    assert augmented.ranked_causes == plain.ranked_causes
     assert augmented.contributing_check_ids == plain.contributing_check_ids
     # Only the tester-facing explanation may grow a qualifier sentence.
     assert augmented.explanation != plain.explanation
@@ -187,7 +166,7 @@ def test_calibration_and_anomaly_never_change_score_only_explanation():
 def test_calibration_and_anomaly_absent_by_default_is_unaffected():
     results = [_result("T001", CheckStatus.FAIL)]
     outcome = assess_results(results, calibration_evaluation=None, anomaly_result=None)
-    assert outcome.primary_cause is RootCause.CABLE
+    assert outcome.primary_cause is RootCause.SENSOR_LINK
 
 
 # ---------------------------------------------------------------------------
@@ -206,13 +185,13 @@ def test_assess_against_real_pipeline_report():
 
     outcome = assess(report)
     assert isinstance(outcome, RootCauseAssessment)
-    # Silence trips FlatlineCheck (T001) and SignalEnergyCheck (T002, low-rms
-    # direction) at minimum -> CABLE is the expected dominant cause.
-    assert outcome.primary_cause is RootCause.CABLE
+    # Silence trips FlatlineCheck (T001) -> SENSOR_LINK is the expected cause.
+    assert outcome.primary_cause is RootCause.SENSOR_LINK
+    assert "T001" in outcome.contributing_check_ids
 
 
 # ---------------------------------------------------------------------------
-# assess_many: a persistent pattern outweighs one noisy window
+# assess_many: scores sum across windows
 # ---------------------------------------------------------------------------
 
 
@@ -221,29 +200,6 @@ class _FakeReport:
         self.check_results = check_results
         self.calibration_evaluation = None
         self.anomaly_result = None
-
-
-def test_assess_many_persistent_pattern_beats_single_noisy_window():
-    # Deviation from a literal reading of "N mostly-PASS reports plus 1 report
-    # with a strong non-PASS signal": if the other N reports are truly all-PASS
-    # they contribute zero to every bucket, so the sum trivially collapses to
-    # whatever the one non-PASS report's own scoring already is -- that doesn't
-    # exercise "a persistent pattern outweighs a single noisy window" at all, it
-    # just reproduces the single window's own verdict. Documented as a brief
-    # deviation in the task report (the brief explicitly sanctions this: "reason
-    # explicitly ... flag as a concern rather than guessing silently").
-    #
-    # Instead: 10 windows each show a small recurring MICROPHONE-only signal
-    # (S002 WARNING, MICROPHONE +1 each -> sums to 10), and exactly one window
-    # shows a strong, one-off CABLE signal (T001 FAIL, CABLE +4). The recurring
-    # pattern's cumulative total (10) beats the single spike (4), so the
-    # combined verdict should still be MICROPHONE, not flipped by the one loud
-    # window.
-    persistent = [_FakeReport([_result("S002", CheckStatus.WARNING)]) for _ in range(10)]
-    noisy_once = _FakeReport([_result("T001", CheckStatus.FAIL)])
-
-    outcome = assess_many(persistent + [noisy_once])
-    assert outcome.primary_cause is RootCause.MICROPHONE
 
 
 def test_assess_many_ignores_reports_with_no_executed_checks():
@@ -257,9 +213,25 @@ def test_assess_many_ignores_reports_with_no_executed_checks():
 def test_assess_many_sums_scores_across_reports():
     reports = [_FakeReport([_result("T008", CheckStatus.WARNING)]) for _ in range(3)]
     outcome = assess_many(reports)
-    cable_score = next(s for c, s, _ in outcome.ranked_causes if c is RootCause.CABLE)
-    assert cable_score == 6.0  # 3 reports x T008 WARNING (+2 each)
+    assert outcome.primary_cause is RootCause.SENSOR_LINK
+    assert outcome.confidence == min(1.0, 6.0 / MAX_SCORE)  # 3 reports x T008 WARNING (+2 each)
 
 
-def test_default_tie_margin_constant():
-    assert DEFAULT_TIE_MARGIN == 0.34
+def test_assess_many_recurring_pattern_accumulates_confidence():
+    # A T009 WARNING recurring across several windows should accumulate a
+    # higher score (and therefore confidence) than the same signal appearing
+    # in just one window -- confirms assess_many sums across the whole
+    # capture rather than only looking at the last/a single window.
+    one_window = assess_many([_FakeReport([_result("T009", CheckStatus.WARNING)])])
+    three_windows = assess_many(
+        [_FakeReport([_result("T009", CheckStatus.WARNING)]) for _ in range(3)]
+    )
+    assert one_window.primary_cause is RootCause.SENSOR_LINK
+    assert three_windows.primary_cause is RootCause.SENSOR_LINK
+    assert three_windows.confidence > one_window.confidence
+
+
+def test_assess_many_no_windows_considered_is_unknown():
+    outcome = assess_many([])
+    assert outcome.primary_cause is RootCause.UNKNOWN
+    assert outcome.contributing_check_ids == []

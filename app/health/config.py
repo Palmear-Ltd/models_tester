@@ -17,7 +17,6 @@ from typing import Optional
 from app.health.checks.frequency_domain import (
     BandEnergyDistributionCheck,
     ElectricalHumCheck,
-    HarmonicResonanceCheck,
     SpectralFlatnessCheck,
     SpectralShapeCheck,
 )
@@ -68,7 +67,6 @@ REGISTRY: list[CheckSpec] = [
     CheckSpec("F002", SpectralFlatnessCheck, "frequency_domain"),
     CheckSpec("F003", BandEnergyDistributionCheck, "frequency_domain"),
     CheckSpec("F004", ElectricalHumCheck, "frequency_domain"),
-    CheckSpec("F005", HarmonicResonanceCheck, "frequency_domain"),
     CheckSpec("S001", EnergyStabilityCheck, "stability"),
     CheckSpec("S002", SpectralStabilityCheck, "stability"),
     CheckSpec("S003", LongTermNoiseFloorCheck, "stability"),

@@ -64,22 +64,15 @@ def test_anomaly_event_to_dict_is_json_serializable():
 
 def test_root_cause_to_dict_is_json_serializable():
     assessment = RootCauseAssessment(
-        primary_cause=RootCause.CABLE,
+        primary_cause=RootCause.SENSOR_LINK,
         confidence=0.42,
-        explanation="Likely a cable problem: there was a complete loss of signal (flatline).",
-        ranked_causes=[
-            (RootCause.CABLE, 4.0, "there was a complete loss of signal (flatline)"),
-            (RootCause.MICROPHONE, 0.0, "no checks currently implicate this cause"),
-        ],
+        explanation="Likely a sensor/cable link problem: there was a complete loss of signal (flatline).",
         contributing_check_ids=["T001"],
     )
     d = root_cause_to_dict(assessment)
-    assert d["primary_cause"] == "CABLE"
+    assert d["primary_cause"] == "SENSOR_LINK"
     assert d["confidence"] == 0.42
-    assert d["explanation"].startswith("Likely a cable problem")
-    assert d["ranked_causes"] == [
-        ["CABLE", 4.0, "there was a complete loss of signal (flatline)"],
-        ["MICROPHONE", 0.0, "no checks currently implicate this cause"],
-    ]
+    assert d["explanation"].startswith("Likely a sensor/cable link problem")
     assert d["contributing_check_ids"] == ["T001"]
+    json.dumps(d)  # must not raise
     json.dumps(d)  # must not raise

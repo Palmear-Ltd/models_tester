@@ -32,10 +32,6 @@ def root_cause_to_dict(assessment) -> dict:
         "primary_cause": assessment.primary_cause.value,
         "confidence": float(assessment.confidence),
         "explanation": assessment.explanation,
-        "ranked_causes": [
-            [cause.value, float(score), reason]
-            for cause, score, reason in assessment.ranked_causes
-        ],
         "contributing_check_ids": list(assessment.contributing_check_ids),
     }
 
