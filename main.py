@@ -798,11 +798,16 @@ class ModelsTesterApp:
         assessment = None
         if state is not HealthState.OK:
             assessment = rootcause.assess(report)
+        if assessment is not None and assessment.primary_cause is not rootcause.RootCause.NONE:
             self.health_cause_label.configure(
                 text=f"Likely cause: {assessment.primary_cause.value} — {assessment.explanation}",
                 foreground=colors.get(state, "gray"),
             )
         else:
+            # Also covers the debounce-lag window where runtime_state is still
+            # WARNING/FAULT (RuntimeMonitor holding a recovery streak) but the
+            # raw report has already recovered to NONE -- avoid showing a
+            # "Likely cause: NONE" line that contradicts health_label above.
             self.health_cause_label.configure(text="", foreground="gray")
 
         for event in events:
