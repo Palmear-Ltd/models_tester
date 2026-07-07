@@ -4,7 +4,8 @@ from app.health.models import (
     Measurement,
     SignalCheckResult,
 )
-from app.health.reporting import check_row, report_rows
+from app.health.reporting import check_row, report_rows, root_cause_row
+from app.health.rootcause import RootCause, RootCauseAssessment
 
 
 def _result(cid, name, status, measurements=None, diag=None):
@@ -92,3 +93,21 @@ def test_report_rows_marks_calibration_deviation_per_check():
     by_id = {r[0]: r for r in report_rows(report)}
     assert by_id["T002"][4] == "FAIL"
     assert by_id["T001"][4] == ""
+
+
+def test_root_cause_row_shape_and_content():
+    assessment = RootCauseAssessment(
+        primary_cause=RootCause.CABLE,
+        confidence=0.5,
+        explanation="Likely a cable problem: there was a complete loss of signal (flatline).",
+        ranked_causes=[(RootCause.CABLE, 4.0, "reason")],
+        contributing_check_ids=["T001"],
+    )
+    row = root_cause_row(assessment)
+    assert row == (
+        "CAUSE",
+        "Likely Cause",
+        "CABLE",
+        "Likely a cable problem: there was a complete loss of signal (flatline).",
+        "",
+    )

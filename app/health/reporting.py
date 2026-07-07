@@ -34,6 +34,17 @@ def check_row(result: SignalCheckResult) -> tuple[str, str, str, str]:
     return (result.check_id, result.check_name, result.status.value, detail)
 
 
+def root_cause_row(assessment) -> tuple[str, str, str, str, str]:
+    """Return a synthetic 5-tuple row summarizing a root-cause assessment.
+
+    Shares the same shape as one row of `report_rows` — (check_id, name,
+    status, detail, cal) — so the UI can insert it into the same tree using
+    the same insert call. `status` holds the primary cause's `.value` and
+    `detail` holds the plain-language explanation; `cal` is unused (empty).
+    """
+    return ("CAUSE", "Likely Cause", assessment.primary_cause.value, assessment.explanation, "")
+
+
 def report_rows(report: HealthReport) -> list[tuple[str, str, str, str, str]]:
     """One display row per check: (check_id, name, status, detail, calibration).
 
