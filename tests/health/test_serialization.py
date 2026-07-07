@@ -1,5 +1,10 @@
 import json
-from app.health.serialization import startup_result_to_dict, anomaly_event_to_dict
+from app.health.serialization import (
+    startup_result_to_dict,
+    anomaly_event_to_dict,
+    root_cause_to_dict,
+)
+from app.health.rootcause import RootCause, RootCauseAssessment
 
 
 class _Sys:
@@ -54,4 +59,27 @@ def test_anomaly_event_to_dict_is_json_serializable():
     assert d["source"] == "mic"
     assert d["timestamp"] == "20260706_120000"
     assert d["contributors"] == [["T002.rms", 3.1], ["F001.spectral_centroid", 1.2]]
+    json.dumps(d)  # must not raise
+
+
+def test_root_cause_to_dict_is_json_serializable():
+    assessment = RootCauseAssessment(
+        primary_cause=RootCause.CABLE,
+        confidence=0.42,
+        explanation="Likely a cable problem: there was a complete loss of signal (flatline).",
+        ranked_causes=[
+            (RootCause.CABLE, 4.0, "there was a complete loss of signal (flatline)"),
+            (RootCause.MICROPHONE, 0.0, "no checks currently implicate this cause"),
+        ],
+        contributing_check_ids=["T001"],
+    )
+    d = root_cause_to_dict(assessment)
+    assert d["primary_cause"] == "CABLE"
+    assert d["confidence"] == 0.42
+    assert d["explanation"].startswith("Likely a cable problem")
+    assert d["ranked_causes"] == [
+        ["CABLE", 4.0, "there was a complete loss of signal (flatline)"],
+        ["MICROPHONE", 0.0, "no checks currently implicate this cause"],
+    ]
+    assert d["contributing_check_ids"] == ["T001"]
     json.dumps(d)  # must not raise

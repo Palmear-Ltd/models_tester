@@ -17,19 +17,23 @@ from typing import Optional
 from app.health.checks.frequency_domain import (
     BandEnergyDistributionCheck,
     ElectricalHumCheck,
+    HarmonicResonanceCheck,
     SpectralFlatnessCheck,
     SpectralShapeCheck,
 )
 from app.health.checks.time_domain import (
+    ClickTransientCheck,
     ClippingCheck,
     CrestFactorCheck,
     DCOffsetCheck,
+    DropoutSegmentCheck,
     FlatlineCheck,
     PeakAmplitudeCheck,
     SignalEnergyCheck,
     ZeroCrossingRateCheck,
 )
 from app.health.checks.stability import (
+    DropoutRecurrenceCheck,
     EnergyStabilityCheck,
     LongTermNoiseFloorCheck,
     SpectralStabilityCheck,
@@ -58,13 +62,17 @@ REGISTRY: list[CheckSpec] = [
     CheckSpec("T005", CrestFactorCheck, "time_domain"),
     CheckSpec("T006", DCOffsetCheck, "time_domain"),
     CheckSpec("T007", ZeroCrossingRateCheck, "time_domain"),
+    CheckSpec("T008", DropoutSegmentCheck, "time_domain"),
+    CheckSpec("T009", ClickTransientCheck, "time_domain"),
     CheckSpec("F001", SpectralShapeCheck, "frequency_domain"),
     CheckSpec("F002", SpectralFlatnessCheck, "frequency_domain"),
     CheckSpec("F003", BandEnergyDistributionCheck, "frequency_domain"),
     CheckSpec("F004", ElectricalHumCheck, "frequency_domain"),
+    CheckSpec("F005", HarmonicResonanceCheck, "frequency_domain"),
     CheckSpec("S001", EnergyStabilityCheck, "stability"),
     CheckSpec("S002", SpectralStabilityCheck, "stability"),
     CheckSpec("S003", LongTermNoiseFloorCheck, "stability"),
+    CheckSpec("S004", DropoutRecurrenceCheck, "stability"),
 ]
 
 

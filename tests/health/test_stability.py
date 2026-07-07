@@ -1,6 +1,7 @@
 import numpy as np
 
 from app.health.checks.stability import (
+    DropoutRecurrenceCheck,
     EnergyStabilityCheck,
     LongTermNoiseFloorCheck,
     SpectralStabilityCheck,
@@ -61,4 +62,32 @@ def test_noise_floor_warns_when_high():
 
 def test_noise_floor_passes_when_low():
     r = LongTermNoiseFloorCheck().run(_win(), {"history": _hist("T002", "rms", [0.01] * 8)})
+    assert r.status is CheckStatus.PASS
+
+
+def test_dropout_recurrence_passes_when_no_recent_dropouts():
+    hist = _hist("T008", "dropout_event_count", [0.0] * 8)
+    r = DropoutRecurrenceCheck().run(_win(), {"history": hist})
+    assert r.status is CheckStatus.PASS
+    assert DropoutRecurrenceCheck().category is CheckCategory.SUPPORTING
+
+
+def test_dropout_recurrence_warns_when_dropouts_recur_across_windows():
+    # 5/8 = 0.625 recent windows show a dropout, above the 0.3 default threshold.
+    vals = [1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0]
+    hist = _hist("T008", "dropout_event_count", vals)
+    r = DropoutRecurrenceCheck().run(_win(), {"history": hist})
+    assert r.status is CheckStatus.WARNING
+    assert _m(r, "recurrence_ratio") > 0.3
+
+
+def test_dropout_recurrence_passes_with_insufficient_history():
+    hist = _hist("T008", "dropout_event_count", [1.0, 1.0])
+    r = DropoutRecurrenceCheck().run(_win(), {"history": hist})
+    assert r.status is CheckStatus.PASS
+
+
+def test_dropout_recurrence_passes_when_source_measurement_absent():
+    hist = [{"T009": {"click_count": 5.0}}] * 8  # no T008.dropout_event_count
+    r = DropoutRecurrenceCheck().run(_win(), {"history": hist})
     assert r.status is CheckStatus.PASS

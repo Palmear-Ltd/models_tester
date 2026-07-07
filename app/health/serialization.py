@@ -27,6 +27,19 @@ def startup_result_to_dict(result) -> dict:
     }
 
 
+def root_cause_to_dict(assessment) -> dict:
+    return {
+        "primary_cause": assessment.primary_cause.value,
+        "confidence": float(assessment.confidence),
+        "explanation": assessment.explanation,
+        "ranked_causes": [
+            [cause.value, float(score), reason]
+            for cause, score, reason in assessment.ranked_causes
+        ],
+        "contributing_check_ids": list(assessment.contributing_check_ids),
+    }
+
+
 def anomaly_event_to_dict(anomaly, *, source, timestamp) -> dict:
     return {
         "timestamp": timestamp,

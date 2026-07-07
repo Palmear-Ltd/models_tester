@@ -9,9 +9,9 @@ from app.health.config import (
 )
 
 ALL_IDS = {
-    "T001", "T002", "T003", "T004", "T005", "T006", "T007",
-    "F001", "F002", "F003", "F004",
-    "S001", "S002", "S003",
+    "T001", "T002", "T003", "T004", "T005", "T006", "T007", "T008", "T009",
+    "F001", "F002", "F003", "F004", "F005",
+    "S001", "S002", "S003", "S004",
 }
 
 
@@ -20,7 +20,7 @@ def _ids(manager):
 
 
 def test_registry_has_all_eleven_checks():
-    assert len(REGISTRY) == 14
+    assert len(REGISTRY) == 18
     assert {s.check_id for s in REGISTRY} == ALL_IDS
 
 
@@ -44,7 +44,7 @@ def test_disabling_an_individual_check():
     cfg = HealthConfig(checks={"F004": CheckConfig(enabled=False)})
     ids = _ids(build_manager(cfg))
     assert "F004" not in ids
-    assert len(ids) == 13
+    assert len(ids) == 17
 
 
 def test_check_params_override_constructor_defaults():
@@ -80,12 +80,12 @@ def test_minimal_profile_is_mandatory_only():
 def test_production_profile_excludes_electrical_hum():
     ids = _profile_ids("production")
     assert "F004" not in ids
-    assert len(ids) == 13
+    assert len(ids) == 17
 
 
 def test_development_and_diagnostic_have_all_eleven():
-    assert len(_profile_ids("development")) == 14
-    assert len(_profile_ids("diagnostic")) == 14
+    assert len(_profile_ids("development")) == 18
+    assert len(_profile_ids("diagnostic")) == 18
 
 
 def test_unknown_profile_raises():

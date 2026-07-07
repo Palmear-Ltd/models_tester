@@ -1,4 +1,5 @@
-"""Time-domain Signal Health Checks (spec §4.8, T001–T007).
+"""Time-domain Signal Health Checks (spec §4.8, T001–T007; T008–T009 add cable-fault
+transient detection).
 
 Each check operates directly on the waveform (NumPy only) and reports a status
 plus measurements. Thresholds are provisional manual defaults; Phase 3 replaces
@@ -277,5 +278,194 @@ class ZeroCrossingRateCheck(SignalHealthCheck):
             check_name=self.check_name,
             status=status,
             measurements=[Measurement("zero_crossing_rate", zcr)],
+            diagnostic_messages=diagnostics,
+        )
+
+
+class DropoutSegmentCheck(SignalHealthCheck):
+    """T008 — detect a brief envelope collapse mid-window (loose contact
+    momentarily breaking circuit).
+
+    S001 (inter-window RMS coefficient-of-variation) and T005 (crest factor)
+    only weakly catch this: both operate on whole-window aggregates diluted
+    by 2.5s of otherwise-normal signal around a single brief dropout. This
+    check instead compares short (default 20ms) frames against a robust
+    local reference (the window's median frame RMS).
+    """
+
+    check_id = "T008"
+    check_name = "Dropout Segment Detection"
+    category = CheckCategory.PRIMARY
+
+    def __init__(
+        self,
+        frame_ms: float = 20.0,
+        dropout_ratio: float = 0.15,
+        min_event_ms: float = 30.0,
+        fault_ratio: float = 0.15,
+        ref_floor: float = 1e-4,
+    ):
+        self.frame_ms = frame_ms
+        self.dropout_ratio = dropout_ratio
+        self.min_event_ms = min_event_ms
+        self.fault_ratio = fault_ratio
+        self.ref_floor = ref_floor
+
+    def run(self, window: AudioWindow, features: dict[str, Any]) -> SignalCheckResult:
+        x = window.samples
+        frame_len = int(window.sample_rate * self.frame_ms / 1000)
+        n_frames = x.size // frame_len if frame_len > 0 else 0
+        if n_frames < 1:
+            return SignalCheckResult(
+                check_id=self.check_id,
+                check_name=self.check_name,
+                status=CheckStatus.PASS,
+                measurements=[],
+                diagnostic_messages=[],
+            )
+
+        frames = x[: n_frames * frame_len].reshape(n_frames, frame_len)
+        frame_rms = np.sqrt(np.mean(frames.astype(np.float64) ** 2, axis=1))
+        ref = float(np.median(frame_rms))
+
+        # No local "normal" level to be intermittent relative to; total/near-total
+        # silence is T001/T002's job, not this check's.
+        if ref < self.ref_floor:
+            return SignalCheckResult(
+                check_id=self.check_id,
+                check_name=self.check_name,
+                status=CheckStatus.PASS,
+                measurements=[],
+                diagnostic_messages=[],
+            )
+
+        dropout_mask = frame_rms < self.dropout_ratio * ref
+
+        # Vectorized run-length encoding via np.diff on a zero-padded boolean array.
+        padded = np.concatenate(([False], dropout_mask, [False])).astype(np.int8)
+        diff = np.diff(padded)
+        starts = np.where(diff == 1)[0]
+        ends = np.where(diff == -1)[0]
+        run_lengths = ends - starts
+
+        dropout_event_count = int(len(run_lengths))
+        max_dropout_run_ms = (
+            float(run_lengths.max()) * self.frame_ms if dropout_event_count else 0.0
+        )
+        dropout_frame_ratio = (
+            float(run_lengths.sum()) / n_frames if dropout_event_count else 0.0
+        )
+
+        diagnostics: list[str] = []
+        for start, end, length in zip(starts, ends, run_lengths):
+            run_ms = float(length) * self.frame_ms
+            boundary = start == 0 or end == n_frames
+            msg = f"Dropout: {run_ms:.0f}ms gap at frame {start}"
+            if boundary:
+                msg += " (at window boundary)"
+            diagnostics.append(msg)
+
+        if dropout_frame_ratio >= self.fault_ratio:
+            status = CheckStatus.FAIL
+        elif dropout_event_count >= 1 and max_dropout_run_ms >= self.min_event_ms:
+            status = CheckStatus.WARNING
+        else:
+            status = CheckStatus.PASS
+            diagnostics = []
+
+        return SignalCheckResult(
+            check_id=self.check_id,
+            check_name=self.check_name,
+            status=status,
+            measurements=[
+                Measurement("dropout_event_count", float(dropout_event_count)),
+                Measurement("max_dropout_run_ms", max_dropout_run_ms, unit="ms"),
+                Measurement("dropout_frame_ratio", dropout_frame_ratio),
+            ],
+            diagnostic_messages=diagnostics,
+        )
+
+
+class ClickTransientCheck(SignalHealthCheck):
+    """T009 — detect sample-domain discontinuities (contact bounce/arcing
+    clicks). Distinct from a dropout (a click is a sharp spike, not an
+    envelope collapse).
+    """
+
+    check_id = "T009"
+    check_name = "Click Transient Detection"
+    category = CheckCategory.PRIMARY
+
+    def __init__(
+        self,
+        click_k: float = 8.0,
+        merge_gap: int = 3,
+        warn_count: int = 3,
+        fault_count: int = 15,
+    ):
+        self.click_k = click_k
+        self.merge_gap = merge_gap
+        self.warn_count = warn_count
+        self.fault_count = fault_count
+
+    def run(self, window: AudioWindow, features: dict[str, Any]) -> SignalCheckResult:
+        x = window.samples.astype(np.float64)
+        d = np.diff(x)
+        if d.size == 0:
+            return SignalCheckResult(
+                check_id=self.check_id,
+                check_name=self.check_name,
+                status=CheckStatus.PASS,
+                measurements=[],
+                diagnostic_messages=[],
+            )
+
+        sigma = 1.4826 * float(np.median(np.abs(d - np.median(d))))
+
+        # A flat/silent signal has zero variation in its first difference;
+        # that's Flatline's job, not this check's.
+        if sigma <= 0:
+            return SignalCheckResult(
+                check_id=self.check_id,
+                check_name=self.check_name,
+                status=CheckStatus.PASS,
+                measurements=[],
+                diagnostic_messages=[],
+            )
+
+        click_mask = np.abs(d) > self.click_k * sigma
+        idxs = np.where(click_mask)[0]
+
+        if idxs.size == 0:
+            click_count = 0
+        else:
+            gaps = np.diff(idxs)
+            group_starts = np.concatenate(([True], gaps > self.merge_gap))
+            click_count = int(np.count_nonzero(group_starts))
+
+        click_rate = click_count / window.window_duration if window.window_duration > 0 else 0.0
+
+        diagnostics: list[str] = []
+        if click_count >= self.fault_count:
+            status = CheckStatus.FAIL
+            diagnostics.append(
+                f"Click transients: {click_count} events (rate {click_rate:.1f}/s) indicate dense clicking/crackle"
+            )
+        elif click_count >= self.warn_count:
+            status = CheckStatus.WARNING
+            diagnostics.append(
+                f"Click transients: {click_count} events (rate {click_rate:.1f}/s)"
+            )
+        else:
+            status = CheckStatus.PASS
+
+        return SignalCheckResult(
+            check_id=self.check_id,
+            check_name=self.check_name,
+            status=status,
+            measurements=[
+                Measurement("click_count", float(click_count)),
+                Measurement("click_rate", click_rate, unit="/s"),
+            ],
             diagnostic_messages=diagnostics,
         )

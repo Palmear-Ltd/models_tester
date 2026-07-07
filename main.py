@@ -19,10 +19,15 @@ from matplotlib.figure import Figure
 from inference_utils import AudioProcessor
 from app.health.config import PROFILES, pipeline_for_profile
 from app.health.models import AudioWindow, HealthState
-from app.health.reporting import report_rows
+from app.health.reporting import report_rows, root_cause_row
 from app.health.monitoring import RuntimeMonitor
 from app.health.startup import StartupDecision, run_validation
-from app.health.serialization import startup_result_to_dict, anomaly_event_to_dict
+from app.health.serialization import (
+    startup_result_to_dict,
+    anomaly_event_to_dict,
+    root_cause_to_dict,
+)
+from app.health import rootcause
 from app.ui import SettingsDialog
 
 SAMPLE_RATE = 44100  # acquisition sample rate (Hz); the whole pipeline runs at this rate
@@ -57,6 +62,7 @@ class ModelsTesterApp:
         self._validating = False
         self._validation_reports = []
         self._last_anomalous = False
+        self._last_root_cause = None
         self.is_running = False
         self.audio_thread = None
         self.audio_queue = queue.Queue()
@@ -251,6 +257,13 @@ class ModelsTesterApp:
             foreground="gray",
         )
         self.health_label.pack(pady=4)
+        self.health_cause_label = ttk.Label(
+            dash_frame,
+            text="",
+            font=("Helvetica", 10),
+            foreground="gray",
+        )
+        self.health_cause_label.pack(pady=(0, 4))
 
         # Energy Indicator
         energy_frame = ttk.Frame(dash_frame)
@@ -293,6 +306,7 @@ class ModelsTesterApp:
         self.health_tree.tag_configure("WARNING", foreground="orange")
         self.health_tree.tag_configure("FAIL", foreground="red")
         self.health_tree.tag_configure("NOT_EXECUTED", foreground="gray")
+        self.health_tree.tag_configure("CAUSE", font=("Helvetica", 9, "bold"))
         self.health_tree.pack(fill="x")
 
         # Status Log
@@ -464,6 +478,7 @@ class ModelsTesterApp:
         self.health_state_history = []
         self.runtime_monitor = RuntimeMonitor()
         self._last_anomalous = False
+        self._last_root_cause = None
         self.start_time = time.time()
         self.session_buffer = np.zeros(int(44100 * self.duration_var.get()), dtype=np.float32)
         self.collected_audio_chunks = []
@@ -691,9 +706,15 @@ class ModelsTesterApp:
         count = len(self.health_pipeline.manager.checks)
         self.log(f"Health profile: {profile} ({count} checks active)")
 
-    def _update_health_panel(self, report):
+    def _update_health_panel(self, report, assessment=None):
         tree = self.health_tree
         tree.delete(*tree.get_children())
+        if assessment is not None and assessment.primary_cause is not rootcause.RootCause.NONE:
+            check_id, name, status, detail, cal = root_cause_row(assessment)
+            tree.insert(
+                "", "end", text=f"{check_id}  {name}",
+                values=(status, cal, detail), tags=("CAUSE",)
+            )
         for check_id, name, status, detail, cal in report_rows(report):
             tree.insert(
                 "", "end", text=f"{check_id}  {name}",
@@ -739,13 +760,20 @@ class ModelsTesterApp:
             calibration_loaded=self.calibration_profile is not None,
         )
         self.log(f"[validation] {result.summary}")
-        self._write_report("startup", startup_result_to_dict(result))
+        assessment = rootcause.assess_many(self._validation_reports)
+        payload = startup_result_to_dict(result)
+        payload["root_cause"] = root_cause_to_dict(assessment)
+        self._write_report("startup", payload)
         show = {
             StartupDecision.PASS: messagebox.showinfo,
             StartupDecision.WARNING: messagebox.showwarning,
             StartupDecision.FAIL: messagebox.showerror,
         }[result.decision]
-        show("Acquisition Validation", f"{result.decision.value}\n\n{result.summary}")
+        show(
+            "Acquisition Validation",
+            f"{result.decision.value}\n\n{result.summary}\n\n"
+            f"Likely cause: {assessment.primary_cause.value}\n{assessment.explanation}",
+        )
 
     def _update_health_indicator(self, report):
         colors = {
@@ -763,8 +791,34 @@ class ModelsTesterApp:
             text=f"Signal Health: {state.value} · conf {report.confidence:.2f}",
             foreground=colors.get(state, "gray"),
         )
+
+        # Root-cause attribution — only computed while unhealthy (state != OK);
+        # cheap rule-based scoring over already-computed check results, never
+        # blocks or alters inference.
+        assessment = None
+        if state is not HealthState.OK:
+            assessment = rootcause.assess(report)
+        if assessment is not None and assessment.primary_cause is not rootcause.RootCause.NONE:
+            self.health_cause_label.configure(
+                text=f"Likely cause: {assessment.primary_cause.value} — {assessment.explanation}",
+                foreground=colors.get(state, "gray"),
+            )
+        else:
+            # Also covers the debounce-lag window where runtime_state is still
+            # WARNING/FAULT (RuntimeMonitor holding a recovery streak) but the
+            # raw report has already recovered to NONE -- avoid showing a
+            # "Likely cause: NONE" line that contradicts health_label above.
+            self.health_cause_label.configure(text="", foreground="gray")
+
         for event in events:
             self.log(f"[monitor] {event.message}: {report.diagnostic_summary}")
+        # Log the likely cause only on change (rising-edge-on-change), mirroring
+        # the anomaly rising-edge pattern below — avoids spamming the log every
+        # 0.5s while a persistent fault is showing.
+        if assessment is not None and assessment.primary_cause is not self._last_root_cause:
+            self.log(f"[likely-cause] {assessment.primary_cause.value}: {assessment.explanation}")
+        self._last_root_cause = assessment.primary_cause if assessment is not None else None
+
         # Log an anomaly only on its rising edge (anomaly_result is None without a profile).
         anomaly = report.anomaly_result
         anomalous = anomaly is not None and anomaly.is_anomalous
@@ -775,7 +829,7 @@ class ModelsTesterApp:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             self._write_report("anomaly", anomaly_event_to_dict(anomaly, source=source, timestamp=ts))
         self._last_anomalous = anomalous
-        self._update_health_panel(report)
+        self._update_health_panel(report, assessment)
 
     def handle_audio_chunk(self, chunk):
         # We need a persistent buffer for the session
