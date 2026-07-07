@@ -97,17 +97,16 @@ def test_report_rows_marks_calibration_deviation_per_check():
 
 def test_root_cause_row_shape_and_content():
     assessment = RootCauseAssessment(
-        primary_cause=RootCause.CABLE,
+        primary_cause=RootCause.SENSOR_LINK,
         confidence=0.5,
-        explanation="Likely a cable problem: there was a complete loss of signal (flatline).",
-        ranked_causes=[(RootCause.CABLE, 4.0, "reason")],
+        explanation="Likely a sensor/cable link problem: there was a complete loss of signal (flatline).",
         contributing_check_ids=["T001"],
     )
     row = root_cause_row(assessment)
     assert row == (
         "CAUSE",
         "Likely Cause",
-        "CABLE",
-        "Likely a cable problem: there was a complete loss of signal (flatline).",
+        "SENSOR_LINK",
+        "Likely a sensor/cable link problem: there was a complete loss of signal (flatline).",
         "",
     )
