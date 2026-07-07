@@ -18,6 +18,7 @@ A professional audio testing application for bioacoustic analysis using TFLite m
   - Energy and trigger timelines
 - **Flexible Configuration**: Adjust mel bands, FFT parameters, sequence length, and more
 - **Result Tracking**: Save audio snapshots and detection results to JSON
+- **Sensor/Cable Link Health Detection**: Automatically flags a broken or intermittent connection between the piezo sensor and the audio jack, independent of the classifier results
 
 ## 🗂️ Project Structure
 
@@ -158,6 +159,47 @@ Enable **"Save results and audio"** to:
   - ORANGE = Suspicious (between thresholds)
   - RED = Infested (above infested threshold)
 - **Current Energy (RMS)**: Real-time audio energy level
+
+## 🔌 Sensor/Cable Link Health Detection
+
+The tool continuously monitors the physical link between the piezo sensor (needle) and the audio input jack — the cable/connection that most often gets damaged in the field from rough handling (the needle being forced into a tree, cables getting twisted or pressured, or the joint between the sensor and cable working loose). This runs automatically alongside every test and never blocks, slows, or changes the classifier's detection results.
+
+### What it detects
+
+- **Complete signal loss** — a fully broken or disconnected cable (dead silence)
+- **Clicking/crackling** — an intermittent or loose connection cutting in and out
+- **Recurring dropouts** — the same problem repeating across several seconds of recording, not just a one-off glitch
+
+When a problem is detected you'll see, in real time:
+- The **Signal Health** label turns orange (WARNING) or red (FAULT)
+- A new line reading **"Likely cause: SENSOR_LINK — ..."** with a plain-language explanation
+- A highlighted **CAUSE** row in the **Signal Health Detail** panel
+- A `[likely-cause]` entry in the log
+
+### Testing locally
+
+1. Run the automated test suite:
+   ```bash
+   .venv/bin/python -m pytest tests/ -q
+   ```
+
+2. Confirm detection works on a known-bad recording:
+   - Select **Wav File** input, browse to `test_data/audio_signal_health/broken_mic/F/`, and pick any file
+   - Click **START TEST**
+   - The health indicator should turn orange/red with a "SENSOR_LINK" cause shown
+
+3. Confirm it stays quiet on a known-good recording:
+   - Browse to `test_data/audio_signal_health/chinese_needle_1/` or `test_data/audio_signal_health/sanded_needle_1/`
+   - The health indicator should stay green, with no cause shown
+
+4. Try **Validate Acquisition** (in the run bar) — it captures ~20 seconds of the loaded/recorded audio and shows a PASS/WARNING/FAIL popup summary, including the likely cause if one was found.
+
+### Testing in the field
+
+1. Select **Microphone** input and start a test with a known-good sensor connection — confirm the indicator stays healthy.
+2. Gently wiggle or partially loosen the cable/connector while recording (without permanently damaging it) — the indicator should flag "SENSOR_LINK" within a couple of seconds.
+3. Use **Validate Acquisition** before starting a real session as a quick pre-check on the connection.
+4. Every flagged issue and validation run is automatically saved as JSON under `reports/`. Periodically collecting these from field devices — especially genuine failures as they happen naturally — helps validate and improve detection accuracy over time.
 
 ## 🔧 Advanced Features
 
