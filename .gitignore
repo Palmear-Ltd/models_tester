@@ -33,3 +33,11 @@ models/*/output/
 test_data/archive/
 test_data/audio_signal_health
 reports/
+
+# Offline decision-rule evaluation artifacts (app/decision harness)
+.score_cache/
+manifest.csv
+manifest_*.csv
+evaluation_report.csv
+evaluation_report_*.csv
+plots/

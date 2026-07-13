@@ -29,6 +29,7 @@ from app.health.serialization import (
 )
 from app.health import rootcause
 from app.ui import SettingsDialog
+from app.decision.threshold import EwmaPeakDecision, default_config as default_decision_config
 
 SAMPLE_RATE = 44100  # acquisition sample rate (Hz); the whole pipeline runs at this rate
 VALIDATION_WINDOWS = 40  # ~20 s of validation at 0.5 s per window
@@ -68,8 +69,6 @@ class ModelsTesterApp:
         self.audio_queue = queue.Queue()
         
         # Stats
-        self.positive_count = 0
-        self.negative_count = 0
         self.total_processed = 0
         
         # Preprocessing Config
@@ -117,6 +116,9 @@ class ModelsTesterApp:
         self.model_path_var = tk.StringVar(value=self.default_model_path)
         self.scaler_path_var = tk.StringVar(value=self.default_scaler_path)
         self.duration_var = tk.DoubleVar(value=2.5)
+        # Single-shot mode's per-window threshold. The sliding-window (multi-window)
+        # decision no longer uses a hand-set threshold — see decision_config above.
+        self.score_thresh_var = tk.DoubleVar(value=0.5)
         
         # Model
         self.interpreter = None
@@ -125,6 +127,12 @@ class ModelsTesterApp:
         self.model_seq_len = self.seq_len_var.get()
         self.model_n_mels = self.n_mels_var.get()
         self.is_one_shot_model = False
+
+        # Session decision (EWMA-peak score vs a data-driven cutoff; see
+        # app/decision/threshold.py and evaluate_decision_rules.py for how the cutoff was
+        # chosen). Reloaded per model directory in load_resources().
+        self.decision_config = default_decision_config()
+        self.decision_accumulator = None
 
         self._setup_ui()
         
@@ -210,39 +218,36 @@ class ModelsTesterApp:
         ttk.Button(controls_frame, text="⚙ Settings", command=self.open_prep_settings).pack(side="left", padx=8)
         ttk.Button(controls_frame, text="Validate Acquisition", command=self.validate_acquisition).pack(side="left", padx=8)
 
-        # --- Thresholds strip (Left) ---
-        limits_frame = ttk.LabelFrame(left_frame, text="Thresholds", padding=8, style="Card.TLabelframe")
+        # --- Decision strip (Left) ---
+        # The multi-window (sliding) decision is EWMA-peak score vs a cutoff fit offline
+        # from labeled data (see app/decision/threshold.py) — no thresholds to hand-tune
+        # here; the active cutoff is shown read-only for transparency and refreshed by
+        # load_resources() whenever a model is (re)loaded.
+        limits_frame = ttk.LabelFrame(left_frame, text="Decision", padding=8, style="Card.TLabelframe")
         limits_frame.pack(fill="x", padx=10, pady=5)
-        ttk.Label(limits_frame, text="Score Thresh:").pack(side="left", padx=2)
-        self.score_thresh_var = tk.DoubleVar(value=0.5)
-        ttk.Entry(limits_frame, textvariable=self.score_thresh_var, width=5).pack(side="left", padx=2)
-        ttk.Label(limits_frame, text="Suspicious >=").pack(side="left", padx=2)
-        self.susp_limit_var = tk.IntVar(value=17)
-        ttk.Entry(limits_frame, textvariable=self.susp_limit_var, width=5).pack(side="left", padx=2)
-        ttk.Label(limits_frame, text="Infested >").pack(side="left", padx=2)
-        self.inf_limit_var = tk.IntVar(value=27)
-        ttk.Entry(limits_frame, textvariable=self.inf_limit_var, width=5).pack(side="left", padx=2)
-        
+        self.decision_cutoff_label = ttk.Label(limits_frame, text="Cutoff (auto-calibrated): —")
+        self.decision_cutoff_label.pack(side="left", padx=2)
+
         # --- Dashboard Frame (Left) ---
         dash_frame = ttk.LabelFrame(left_frame, text="Dashboard", padding=12, style="Card.TLabelframe")
         dash_frame.pack(fill="x", padx=10, pady=5)
-        
+
         # Counters
         count_frame = ttk.Frame(dash_frame)
         count_frame.pack(fill="x", pady=5)
-        
-        # Positive
+
+        # EWMA peak
         pos_frame = ttk.Frame(count_frame, padding=5, relief="solid", borderwidth=1)
         pos_frame.pack(side="left", fill="both", expand=True, padx=5)
-        ttk.Label(pos_frame, text="POSITIVE", font=("Helvetica", 14, "bold"), foreground="red").pack()
-        self.pos_label = ttk.Label(pos_frame, text="0", font=("Helvetica", 24, "bold"))
+        ttk.Label(pos_frame, text="EWMA PEAK", font=("Helvetica", 14, "bold"), foreground="red").pack()
+        self.pos_label = ttk.Label(pos_frame, text="0.00", font=("Helvetica", 24, "bold"))
         self.pos_label.pack()
-        
-        # Negative
+
+        # Live state
         neg_frame = ttk.Frame(count_frame, padding=5, relief="solid", borderwidth=1)
         neg_frame.pack(side="left", fill="both", expand=True, padx=5)
-        ttk.Label(neg_frame, text="NEGATIVE", font=("Helvetica", 14, "bold"), foreground="green").pack()
-        self.neg_label = ttk.Label(neg_frame, text="0", font=("Helvetica", 24, "bold"))
+        ttk.Label(neg_frame, text="STATE", font=("Helvetica", 14, "bold"), foreground="green").pack()
+        self.neg_label = ttk.Label(neg_frame, text="—", font=("Helvetica", 24, "bold"))
         self.neg_label.pack()
 
         # Diagnosis
@@ -453,7 +458,14 @@ class ModelsTesterApp:
             messagebox.showerror("Error", f"Failed to load scaler data:\n{reason}")
             return False
         self.log(f"Loaded Scaler: {os.path.basename(scaler_path)}")
-        
+
+        # Load decision calibration (EWMA-peak cutoff) from next to the model, if present;
+        # falls back to the shipped models/9_1_2 default otherwise (a fitted cutoff is
+        # specific to the model/scaler pair it was calibrated against).
+        threshold_path = os.path.join(os.path.dirname(model_path), "decision_threshold.json")
+        self.decision_config = default_decision_config(threshold_path=threshold_path)
+        self.log(f"Decision cutoff: {self.decision_config.cutoff:.4f} (span={self.decision_config.span})")
+
         return True
 
     def toggle_test(self):
@@ -465,10 +477,10 @@ class ModelsTesterApp:
                 
     def start_test(self):
         self.is_running = True
-        self.positive_count = 0
-        self.negative_count = 0
-        self.pos_label.configure(text="0")
-        self.neg_label.configure(text="0")
+        self.decision_accumulator = EwmaPeakDecision(self.decision_config)
+        self.pos_label.configure(text="0.00")
+        self.neg_label.configure(text="—")
+        self.decision_cutoff_label.configure(text=f"Cutoff (auto-calibrated): {self.decision_config.cutoff:.4f}")
         self.diag_label.configure(text="Testing...", foreground="blue")
         
         # Reset History
@@ -543,18 +555,15 @@ class ModelsTesterApp:
             self.diag_label.configure(text=f"HEALTHY (Score: {score:.2f})", foreground="green")
             return False
 
-        pos = self.positive_count
-        susp_limit = self.susp_limit_var.get()
-        inf_limit = self.inf_limit_var.get()
-        predicted_infested = False
-        
-        if pos < susp_limit:
-            self.diag_label.configure(text=f"HEALTHY (Pos: {pos})", foreground="green")
-        elif pos <= inf_limit:
-            self.diag_label.configure(text=f"SUSPICIOUS (Pos: {pos})", foreground="orange")
-        else:
-            self.diag_label.configure(text=f"INFESTED (Pos: {pos})", foreground="red")
-            predicted_infested = True
+        if self.decision_accumulator is None:
+            self.diag_label.configure(text="NO RESULT", foreground="gray")
+            return False
+
+        peak = self.decision_accumulator.peak
+        state = self.decision_accumulator.state
+        predicted_infested = state == "INFESTED"
+        color = "red" if predicted_infested else "green"
+        self.diag_label.configure(text=f"{state} (EWMA peak: {peak:.3f})", foreground=color)
         return predicted_infested
 
     def mic_loop(self, device_idx):
@@ -930,9 +939,12 @@ class ModelsTesterApp:
                 "scaler_path": self.scaler_path_var.get(),
                 "user_label": self.user_label_var.get(),
                 "predicted_infested": bool(predicted_infested),
-                "score_thresh": self.score_thresh_var.get(),
-                "susp_limit": self.susp_limit_var.get(),
-                "inf_limit": self.inf_limit_var.get(),
+                "score_thresh": self.score_thresh_var.get(),  # single-shot mode only
+                "decision_method": "ewma_peak",
+                "decision_cutoff": self.decision_config.cutoff,
+                "decision_span": self.decision_config.span,
+                "decision_final_state": self.decision_accumulator.state if self.decision_accumulator else None,
+                "decision_ewma_peak": self.decision_accumulator.peak if self.decision_accumulator else None,
                 "n_mels": self.n_mels_var.get(),
                 "seq_len": self.seq_len_var.get(),
                 "low_cut": self.low_cut_var.get(),
@@ -999,17 +1011,18 @@ class ModelsTesterApp:
             output_data = self.interpreter.get_tensor(self.output_details[0]['index'])
             
             # 5. Logic
+            # score_thresh only drives the display-only per-window marker below (and
+            # single-shot mode's final call) — the sliding-window session decision is the
+            # EWMA-peak accumulator updated further down, not a per-window threshold.
             score_thresh = self.score_thresh_var.get()
-            
-            predicted = 0
+
             score = 0
             if output_data.shape[-1] == 1:
                 score = output_data[0][0]
-                predicted = 1 if score > score_thresh else 0
             else:
                 # Softmax - usually binary still, but if index 1 is positive
                 score = output_data[0][1] # P(Positive)
-                predicted = 1 if score > score_thresh else 0
+            predicted = 1 if score > score_thresh else 0
 
             # Store stats for plot
             self.score_history.append(score)
@@ -1017,16 +1030,13 @@ class ModelsTesterApp:
             self.trigger_history.append((curr_time, predicted))
             self.energy_history.append((curr_time, rms))
 
-            # Update Stats
-            if predicted == 1:
-                self.positive_count += 1
-                self.pos_label.configure(text=str(self.positive_count))
-                res_str = f"POS ({score:.2f})"
-            else:
-                self.negative_count += 1
-                self.neg_label.configure(text=str(self.negative_count))
-                res_str = f"NEG ({score:.2f})"
-                
+            # Update session decision (EWMA-peak vs the auto-calibrated cutoff)
+            if self.decision_accumulator is not None:
+                self.decision_accumulator.update(float(score))
+                self.pos_label.configure(text=f"{self.decision_accumulator.peak:.2f}")
+                self.neg_label.configure(text=self.decision_accumulator.state)
+
+            res_str = f"POS ({score:.2f})" if predicted == 1 else f"NEG ({score:.2f})"
             self.log(f"Processed: {res_str}")
                 
         except Exception as e:
