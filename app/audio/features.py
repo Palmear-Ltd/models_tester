@@ -24,11 +24,11 @@ class FeatureExtractor:
     def extract_features(self, audio_data, sr=44100, n_mels=32,
                          low_cut=500.0, up_cut=8000.0, fmin=50,fmax=10000,
                          sub_win_size_sec=0.05, sub_hop_size_sec=0.025,
-                         use_filter=True, seq_len=98, enable_downsample=False, 
+                         use_filter=False, seq_len=98, enable_downsample=False,
                          downsample_sr=22050, use_pcen=False):
         """
         Extract mel spectrogram features from audio data.
-        
+
         Args:
             audio_data: Raw audio time series
             sr: Sample rate (default: 44100)
@@ -37,7 +37,9 @@ class FeatureExtractor:
             up_cut: High cut frequency in Hz (default: 8000.0)
             sub_win_size_sec: FFT window size in seconds (default: 0.05)
             sub_hop_size_sec: Hop size in seconds (default: 0.025)
-            use_filter: Whether to apply bandpass filter (default: True)
+            use_filter: Whether to apply bandpass filter (default: False —
+                matches the mobile app, which ships with the filter off;
+                it's opt-in via app settings and most users leave it off)
             seq_len: Target sequence length in frames (default: 98)
             enable_downsample: Whether to downsample audio (default: False)
             downsample_sr: Target sample rate for downsampling (default: 22050)
@@ -126,7 +128,11 @@ class FeatureExtractor:
             log_mel = 10.0 * np.log10(mel_spec + 1e-12)  # (n_mels+1, n_frames)
 
             # 8) transpose to [frames, mels], drop last mel band -> 32
-            features = log_mel.T[:, :-1].astype(np.float32)  # (n_frames, 32)
+            # Stay float64 here (matches the mobile app, which normalizes in
+            # double precision and only rounds to float32 once, at the TFLite
+            # call). Rounding here first would normalize in float32 like the
+            # old tester did, diverging from the app's arithmetic.
+            features = log_mel.T[:, :-1]  # (n_frames, 32)
             pad_value = silence_floor
 
         # ---- PCEN PATH (kept; not implemented in Flutter) ----

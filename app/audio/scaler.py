@@ -64,13 +64,13 @@ class Scaler:
                 if mean is None:
                     return self._fail(f"{path}: JSON missing 'mean'/'mean_'")
 
-                mean = np.asarray(mean, dtype=np.float32)
+                mean = np.asarray(mean, dtype=np.float64)
 
                 # Prefer explicit var; otherwise compute from scale
                 if var is not None:
-                    var = np.asarray(var, dtype=np.float32)
+                    var = np.asarray(var, dtype=np.float64)
                 elif scale is not None:
-                    scale = np.asarray(scale, dtype=np.float32)
+                    scale = np.asarray(scale, dtype=np.float64)
                     var = scale * scale
                 else:
                     return self._fail(f"{path}: JSON missing 'var'/'scale'")
@@ -98,8 +98,8 @@ class Scaler:
                     f"{path}: .npz missing 'var'/'var_' (keys: {list(data.keys())})"
                 )
 
-            self.mean = np.asarray(mean, dtype=np.float32)
-            self.var = np.asarray(var, dtype=np.float32)
+            self.mean = np.asarray(mean, dtype=np.float64)
+            self.var = np.asarray(var, dtype=np.float64)
             return self.mean, self.var
         except Exception as e:
             return self._fail(f"{path}: {type(e).__name__}: {e}")
@@ -124,8 +124,8 @@ class Scaler:
         if mean is None or var is None:
             raise ValueError("Scaler not loaded: mean/var are None")
 
-        mean = np.asarray(mean, dtype=np.float32)
-        var = np.asarray(var, dtype=np.float32)
+        mean = np.asarray(mean, dtype=np.float64)
+        var = np.asarray(var, dtype=np.float64)
 
         scale = np.sqrt(var)
         # Avoid divide by zero

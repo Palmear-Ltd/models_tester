@@ -46,6 +46,8 @@ HOP_SEC = 0.5
 WINDOW_SEC = 2.5
 
 # Must match main.py's Tk-var defaults exactly (main.py:970-982).
+# use_filter=False: the mobile app ships with the bandpass filter disabled
+# (opt-in via app settings), and most users never enable it.
 DEFAULT_PREP_PARAMS = dict(
     low_cut=500.0,
     up_cut=8000.0,
@@ -53,7 +55,7 @@ DEFAULT_PREP_PARAMS = dict(
     fmax=10000.0,
     sub_win_size_sec=0.05,
     sub_hop_size_sec=0.025,
-    use_filter=True,
+    use_filter=False,
 )
 
 MANIFEST_FIELDS = [

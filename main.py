@@ -72,7 +72,9 @@ class ModelsTesterApp:
         self.total_processed = 0
         
         # Preprocessing Config
-        self.use_filter_var = tk.BooleanVar(value=True)
+        # Default off: the mobile app ships with the bandpass filter disabled
+        # (opt-in via app settings), and most users never enable it.
+        self.use_filter_var = tk.BooleanVar(value=False)
         self.low_cut_var = tk.DoubleVar(value=500.0)
         self.up_cut_var = tk.DoubleVar(value=8000.0)
         self.sub_win_size_var = tk.DoubleVar(value=0.05)

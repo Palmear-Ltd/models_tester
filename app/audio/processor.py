@@ -5,15 +5,15 @@ Handles audio filtering, resampling, and downsampling operations.
 """
 
 import librosa
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, lfilter
 
 
 class AudioProcessor:
     """
-    Handles audio preprocessing operations including filtering, 
+    Handles audio preprocessing operations including filtering,
     resampling, and downsampling.
     """
-    
+
     def __init__(self):
         self.sample_rate = 44100  # Target SR
         self.buffer_duration = 2.5
@@ -21,26 +21,32 @@ class AudioProcessor:
         # 16 is safe minimum for 4th order butterworth, but let's be safe
         self.min_samples_for_filter = 18
 
-    def butter_filter(self, y, cutoff, sr, btype, order=4):
+    def bandpass_filter(self, y, low_cut, high_cut, sr, order=4):
         """
-        Apply Butterworth filter to audio signal.
-        
+        Apply a single Butterworth bandpass filter via one-directional lfilter.
+
+        Matches the mobile app (AudioDsp.applyBandpassFilter in
+        palmear_mobile_processor.dart): one combined bandpass design run
+        through a single-pass Direct-Form-II-Transposed filter, not two
+        separate highpass/lowpass filters run through zero-phase filtfilt.
+
         Args:
             y: Audio time series
-            cutoff: Cutoff frequency in Hz
+            low_cut: Low cutoff frequency in Hz
+            high_cut: High cutoff frequency in Hz
             sr: Sample rate
-            btype: Filter type ('high' or 'low')
             order: Filter order (default: 4)
-            
+
         Returns:
             Filtered audio signal
         """
         nyquist = 0.5 * sr
-        normalized_cutoff = cutoff / nyquist
-        if normalized_cutoff >= 1.0:
-            normalized_cutoff = 0.999
-        b, a = butter(order, normalized_cutoff, btype=btype, analog=False)
-        return filtfilt(b, a, y)
+        low = low_cut / nyquist
+        high = high_cut / nyquist
+        if high >= 1.0:
+            high = 0.999
+        b, a = butter(order, [low, high], btype="band", analog=False)
+        return lfilter(b, a, y)
 
     def downsample(self, y, orig_sr, target_sr):
         """
@@ -102,8 +108,7 @@ class AudioProcessor:
         if use_filter:
             if len(y) > self.min_samples_for_filter:
                 try:
-                    y = self.butter_filter(y, low_cut, audio_sr, btype="high")
-                    y = self.butter_filter(y, up_cut, audio_sr, btype="low")
+                    y = self.bandpass_filter(y, low_cut, up_cut, audio_sr)
                 except Exception:
                     pass
         
