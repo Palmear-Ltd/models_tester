@@ -35,6 +35,13 @@ SAMPLE_RATE = 44100  # acquisition sample rate (Hz); the whole pipeline runs at 
 VALIDATION_WINDOWS = 40  # ~20 s of validation at 0.5 s per window
 USER_SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_settings.json")
 
+
+def mic_capture_duration_sec(inference_mode, single_shot_duration_sec, sliding_test_duration_sec):
+    """Max mic capture duration (seconds) before a test auto-stops, by inference mode."""
+    if inference_mode == "single":
+        return single_shot_duration_sec
+    return sliding_test_duration_sec
+
 # Try to import TFLite Interpreter
 try:
     import tflite_runtime.interpreter as tflite
@@ -86,6 +93,9 @@ class ModelsTesterApp:
         self.seq_len_var = tk.IntVar(value=98)
         self.inference_mode_var = tk.StringVar(value="sliding")
         self.single_shot_duration_sec = 20
+        # Sliding-window mic tests auto-stop after this many seconds (like single-shot
+        # already did), so a tester isn't stuck manually clicking STOP TEST every run.
+        self.sliding_test_duration_var = tk.DoubleVar(value=20.0)
         self.collected_audio_chunks = []
         self.final_audio_clip = None
         self.single_shot_processed = False
@@ -627,10 +637,12 @@ class ModelsTesterApp:
         
         block_size = int(sample_rate * 0.5) # 0.5 sec blocks
 
-        max_chunks = None
-        if self.inference_mode_var.get() == "single":
-            max_chunks = int(self.single_shot_duration_sec / 0.5)
-            self.log(f"Single-shot mode: capturing {self.single_shot_duration_sec}s")
+        duration_sec = mic_capture_duration_sec(
+            self.inference_mode_var.get(), self.single_shot_duration_sec, self.sliding_test_duration_var.get()
+        )
+        max_chunks = int(duration_sec / 0.5)
+        mode_label = "Single-shot" if self.inference_mode_var.get() == "single" else "Sliding-window"
+        self.log(f"{mode_label} mode: capturing {duration_sec}s")
         chunk_count = [0]
         
         def callback(indata, frames, time, status):
@@ -730,6 +742,7 @@ class ModelsTesterApp:
             ("output_dir", self.output_dir_var),
             ("duration", self.duration_var),
             ("score_thresh", self.score_thresh_var),
+            ("sliding_test_duration", self.sliding_test_duration_var),
         ]
 
     def _save_settings(self):

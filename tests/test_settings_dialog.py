@@ -105,6 +105,43 @@ def test_model_dropdown_selection_updates_paths():
     root.destroy()
 
 
+def test_acquisition_tab_binds_sliding_test_duration_spinbox():
+    # Mic sliding-window tests auto-stop after app.sliding_test_duration_var seconds
+    # (main.py:mic_loop) -- confirm the Settings spinbox is wired to that same var.
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        import pytest
+        pytest.skip("no display available")
+    root.withdraw()
+
+    class _App:
+        def __init__(self):
+            self.duration_var = tk.DoubleVar(value=2.5)
+            self.output_dir_var = tk.StringVar(value="")
+            self.user_label_var = tk.StringVar(value="healthy")
+            self.save_results_var = tk.BooleanVar(value=False)
+            self.inference_mode_var = tk.StringVar(value="sliding")
+            self.single_shot_duration_sec = 20
+            self.sliding_test_duration_var = tk.DoubleVar(value=20.0)
+            self.is_one_shot_model = False
+            self.root = root
+
+        def browse_output_dir(self):
+            pass
+
+    app = _App()
+    dlg = SettingsDialog(app)
+    from tkinter import ttk
+    nb = ttk.Notebook(root)
+    dlg._build_acquisition_tab(nb)  # must not raise
+
+    app.sliding_test_duration_var.set(30.0)
+    assert app.sliding_test_duration_var.get() == 30.0
+    root.destroy()
+
+
 def test_discover_models_finds_all_shipped_models():
     # Exercises the real (non-fake) discovery method against the repo's actual
     # models/ directory -- must handle the scaler.json/scalar.json naming
