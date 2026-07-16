@@ -10,11 +10,13 @@ Bolted onto it is the **Audio Signal Health Monitoring** subsystem in `app/healt
 
 ## Status — Audio Signal Health Monitoring (Phases 0–6 COMPLETE)
 
-Built on branch `features/audio_signal_health`. 137 tests pass. Per-phase specs in `docs/superpowers/specs/`, plans in `docs/superpowers/plans/`. The authoritative phase-by-phase log (what each delivered, file by file) is the memory note `audio-health-monitoring-phases.md` — **read it first** next session.
+Built on branch `features/audio_signal_health`. 259 tests pass. Per-phase specs in `docs/superpowers/specs/`, plans in `docs/superpowers/plans/`. The authoritative phase-by-phase log (what each delivered, file by file) is the memory note `audio-health-monitoring-phases.md` — **read it first** next session.
 
 - **0** foundation + integration seam · **1** time-domain checks T001–T007 + fusion + live indicator · **2** frequency checks F001–F004 + per-check panel + config profiles · **3** calibration (generation CLI `calibrate.py`, evaluation, UI) · **4** stability checks S001–S003 + debounced `RuntimeMonitor` + health timeline plot · **5** startup validation engine + "Validate Acquisition" button · **6** anomaly detection (RMS z-distance) → confidence, surfaced in indicator/log.
 
 Deferred (noted in specs): persisting startup/anomaly reports; full-covariance Mahalanobis (needs an extended profile format).
+
+**Post-completion fix (2026-07-16):** `rootcause.py`'s SENSOR_LINK attribution (the engine behind the "Validate Acquisition" button and live "Likely cause" label) was found firing at confidence 1.00 on every recording tested — fault, clean, and infested alike — making it useless as a tester-facing signal. Root cause: T009's hardcoded click-count thresholds sat inside the noise floor of genuinely healthy piezo contact, and `assess_many` fired SENSOR_LINK on any positive summed score across a session with no baseline-relative floor. Fixed by recalibrating T009 (informed by `calibration_profiles/multiyear_healthy_v1.json`) and replacing the session-level rule with a mean-per-window-score vs. a persisted cutoff (`app/health/check_thresholds.json`, `app/health/rootcause_session_config.json` — same load-JSON-with-fallback idiom as `app/decision/threshold.py`). Along the way, found and worked around a real artifact: a session's first ~4 windows are built from a still-partly-zero rolling buffer (see `main.py:handle_audio_chunk`), and the zero→signal edge spuriously trips the click detector, inflating every session's score by a roughly constant floor — documented but *not* eliminated (see comment next to `DEFAULT_SESSION_CUTOFF` in `rootcause.py`). Spec/plan: `docs/superpowers/{specs,plans}/2026-07-16-rootcause-threshold-recalibration*.md`. Commits `a99777c`, `ef52724`, `35dbd14` (the last also adds a Run-bar "Refresh" devices button and a threshold-config transparency log line).
 
 ## `app/health/` map (the portable core)
 
