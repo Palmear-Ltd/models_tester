@@ -268,11 +268,16 @@ def test_assess_many_occasional_isolated_warning_is_not_sensor_link():
 
 
 def test_assess_many_persistent_fault_pattern_is_sensor_link():
-    # A T009 WARNING recurring across half the session -- a persistent
-    # pattern, not a one-off blip. mean_score = 20*1.0/40 = 0.5, clearly over
-    # the default cutoff.
-    session = [_healthy_window() for _ in range(20)] + [
-        _isolated_warning_window() for _ in range(20)
+    # A T009 WARNING recurring across most of the session -- a persistent
+    # pattern, not a one-off blip. mean_score = 30*1.0/40 = 0.75, clearly over
+    # the default cutoff (0.55 -- see DEFAULT_SESSION_CUTOFF's docstring for
+    # why it's this high: it's fit against real sessions, whose first ~4
+    # windows carry a startup-buffer artifact that inflates every session's
+    # floor, clean or faulty; these synthetic FakeReport sessions don't
+    # reproduce that artifact, so the bad-window fraction has to clear the
+    # same bar on its own).
+    session = [_healthy_window() for _ in range(10)] + [
+        _isolated_warning_window() for _ in range(30)
     ]
     outcome = assess_many(session)
     assert outcome.primary_cause is RootCause.SENSOR_LINK
@@ -288,8 +293,8 @@ def test_assess_many_confidence_scales_with_persistence_within_fixed_session():
     # pattern fixed -- i.e. it was asserting the raw-sum saturation bug on
     # purpose. Rate within a fixed-length session is the correct axis.)
     mostly_healthy = [_healthy_window() for _ in range(9)] + [_isolated_warning_window()]
-    mostly_faulty = [_healthy_window() for _ in range(5)] + [
-        _isolated_warning_window() for _ in range(5)
+    mostly_faulty = [_healthy_window() for _ in range(3)] + [
+        _isolated_warning_window() for _ in range(7)
     ]
     low_rate = assess_many(mostly_healthy)
     high_rate = assess_many(mostly_faulty)
@@ -358,6 +363,7 @@ def test_default_session_config_reads_custom_file(tmp_path):
 # ---------------------------------------------------------------------------
 
 import glob  # noqa: E402
+import math  # noqa: E402
 import os as _os  # noqa: E402
 
 import pytest  # noqa: E402
@@ -369,6 +375,8 @@ _FP_F_DIR = _os.path.join(_REPO_ROOT, "test_data", "audio_signal_health", "fp", 
 _TN_F_DIR = _os.path.join(_REPO_ROOT, "test_data", "F")
 
 _CORPUS_SR = 44100
+_CORPUS_HOP_SEC = 0.5
+_CORPUS_WINDOW_SEC = 2.5
 
 
 def _load_wav(path):
@@ -379,17 +387,46 @@ def _load_wav(path):
     return data
 
 
-def _session_outcome(path):
-    from app.health.calibration import iter_windows
-    from app.health.config import pipeline_for_profile
+def _session_audio_windows(signal, sample_rate=_CORPUS_SR):
+    """Reproduces main.py's live sliding-window scheme exactly (handle_audio_chunk,
+    main.py:890-901) -- NOT a bare non-overlapping slice of the raw file. A
+    persistent buffer is zero-initialized like a freshly started session, then
+    updated every 0.5s hop via np.roll (tail hop zero-padded rather than
+    dropped), so the first ~4 windows of every real session are built from a
+    buffer that's still mostly/partly exact zero. This is also exactly what
+    offline_score.py's score_wav_file() does -- its docstring calls it out as
+    the documented canonical replication of main.py's windowing, adapted here
+    to yield AudioWindow objects for the health pipeline instead of running
+    inference. Using a naive non-overlapping slice (as an earlier version of
+    this test did, via app.health.calibration.iter_windows) understates the
+    session length (36 windows instead of 40 for a 20s file) and skips the
+    zero-buffer warmup entirely -- which turned out to matter (see
+    DEFAULT_SESSION_CUTOFF's docstring in rootcause.py)."""
     from app.health.models import AudioWindow
 
-    pipeline = pipeline_for_profile("development")  # no calibration profile loaded
+    block_size = int(sample_rate * _CORPUS_HOP_SEC)
+    buffer_len = int(sample_rate * _CORPUS_WINDOW_SEC)
+    total_samples = len(signal)
+    n_hops = math.ceil(total_samples / block_size) if total_samples > 0 else 0
+
+    buffer = np.zeros(buffer_len, dtype=np.float32)
+    for hop in range(n_hops):
+        start = hop * block_size
+        end = min(start + block_size, total_samples)
+        chunk = signal[start:end]
+        if len(chunk) < block_size:
+            chunk = np.pad(chunk, (0, block_size - len(chunk)))
+        buffer = np.roll(buffer, -block_size)
+        buffer[-block_size:] = chunk
+        yield AudioWindow(samples=buffer.copy(), sample_rate=sample_rate)
+
+
+def _session_outcome(path):
+    from app.health.config import pipeline_for_profile
+
+    pipeline = pipeline_for_profile("development")  # fresh session, no calibration profile
     signal = _load_wav(path)
-    reports = [
-        pipeline.analyze(AudioWindow(samples=w, sample_rate=_CORPUS_SR))
-        for w in iter_windows(signal, _CORPUS_SR)
-    ]
+    reports = [pipeline.analyze(w) for w in _session_audio_windows(signal)]
     return assess_many(reports)
 
 

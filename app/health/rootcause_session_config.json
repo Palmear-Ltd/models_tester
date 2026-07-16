@@ -1,4 +1,4 @@
 {
   "method": "mean_score",
-  "cutoff": 0.25
+  "cutoff": 0.55
 }

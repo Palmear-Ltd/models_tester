@@ -105,7 +105,32 @@ _WEIGHT_TABLE: dict = {
 # 2026-07-16-rootcause-threshold-recalibration-design.md for the replay
 # numbers. Retune by editing rootcause_session_config.json, no code change
 # needed.
-DEFAULT_SESSION_CUTOFF = 0.25
+#
+# IMPORTANT: fit against the REAL session windowing (a persistent 2.5s
+# buffer, zero-initialized like a freshly started session, rolled+updated
+# every 0.5s hop -- see main.py:handle_audio_chunk / offline_score.py's
+# score_wav_file(), the documented canonical replication), NOT a bare
+# non-overlapping slice of the raw file. Every real session's first ~4
+# windows are built from a buffer that is mostly/partly exact zero (the
+# startup buffer hasn't filled with real audio yet), and the corrected
+# replay showed this isn't just cosmetic: the hard zero->signal edge inside
+# that partially-zero window makes ClickTransientCheck's MAD-based sigma
+# (computed from the whole window's sample-diffs, dominated by exact-zero
+# diffs in the padded region) collapse to a tiny value, so the ordinary,
+# non-anomalous audio in the *real* portion of that same window trips the
+# click threshold thousands of times over -- and the zero-padded run itself
+# also reads as a genuine dropout to T008/S004. This inflates the mean score
+# of EVERY session (clean or faulty) by a roughly constant amount in its
+# first few windows, raising the floor this cutoff has to clear. It was
+# accounted for empirically here (the cutoff is fit against sessions that
+# include this artifact), but the artifact itself is not fixed by this
+# change -- if a future recalibration needs a lower cutoff (e.g. once a
+# finer-grained calibration profile exists) and can't get clean separation,
+# this warmup-window distortion is the first thing to fix, e.g. by warming
+# the buffer with the first real audio instead of zeros, or having
+# ClickTransientCheck/DropoutSegmentCheck exclude a leading exact-zero run
+# from their statistics.
+DEFAULT_SESSION_CUTOFF = 0.55
 
 DEFAULT_SESSION_CONFIG_PATH = os.path.join(
     os.path.dirname(__file__), "rootcause_session_config.json"
