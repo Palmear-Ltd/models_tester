@@ -17,7 +17,7 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from inference_utils import AudioProcessor
-from app.health.config import PROFILES, pipeline_for_profile
+from app.health.config import DEFAULT_CHECK_THRESHOLDS_PATH, PROFILES, pipeline_for_profile
 from app.health.models import AudioWindow, HealthState
 from app.health.reporting import report_rows, root_cause_row
 from app.health.monitoring import RuntimeMonitor
@@ -218,6 +218,8 @@ class ModelsTesterApp:
         self.device_combo = ttk.Combobox(run_frame, textvariable=self.device_var)
         self.device_combo.grid(row=1, column=1, padx=5, sticky="ew")
         self.file_btn = ttk.Button(run_frame, text="Browse", command=self.browse_wav_file)
+        self.refresh_devices_btn = ttk.Button(run_frame, text="⟳ Refresh", command=self.refresh_devices)
+        self.refresh_devices_btn.grid(row=1, column=3, padx=5)
         self.refresh_devices()
 
         controls_frame = ttk.Frame(run_frame)
@@ -351,6 +353,10 @@ class ModelsTesterApp:
         self.ax_health = self.plot_fig.add_subplot(gs[3, :])    # health timeline: full-width strip
         self.plot_canvas = FigureCanvasTkAgg(self.plot_fig, master=right_frame)
         self.plot_canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        # status_log now exists, so this is the first point where the initial
+        # health_pipeline built above (before any UI existed) can be logged.
+        self._rebuild_health_pipeline()
 
     def _is_dark_mode(self):
         if platform.system() == "Darwin":
@@ -705,6 +711,10 @@ class ModelsTesterApp:
             self.profile_var.get(), calibration_profile=self.calibration_profile
         )
         self._last_health_state = None
+        if os.path.isfile(DEFAULT_CHECK_THRESHOLDS_PATH):
+            self.log(f"Health check thresholds: loaded {DEFAULT_CHECK_THRESHOLDS_PATH}")
+        else:
+            self.log("Health check thresholds: shipped defaults (no check_thresholds.json found)")
 
     def _load_calibration_profile(self, path):
         from app.health.calibration import load_profile
