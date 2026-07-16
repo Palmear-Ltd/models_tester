@@ -110,6 +110,13 @@ class ModelsTesterApp:
         self.default_output_dir = os.path.join(self.default_base_dir, "output")
         os.makedirs(self.default_output_dir, exist_ok=True)
 
+        # Preloaded models: models/<name>/ folders that contain both a model.tflite
+        # and a scaler file, so the Settings dialog can offer a dropdown instead of
+        # requiring manual Browse for every model swap.
+        self.available_models = self._discover_models()
+        default_model_name = "9_1_2" if "9_1_2" in self.available_models else next(iter(self.available_models), "")
+        self.model_choice_var = tk.StringVar(value=default_model_name)
+
         # Saving options
         self.save_results_var = tk.BooleanVar(value=False) # single toggle controls both wav and json
         self.save_audio_var = self.save_results_var
@@ -390,11 +397,47 @@ class ModelsTesterApp:
         # Helper to swtich UI for file mode
         pass
 
+    def _discover_models(self):
+        """Scan models/<name>/ for a model.tflite + a scaler file.
+
+        Returns {name: (model_path, scaler_path)}, sorted by name. A folder
+        without both files is skipped (e.g. an in-progress model drop).
+        """
+        models_dir = os.path.join(os.getcwd(), "models")
+        discovered = {}
+        if not os.path.isdir(models_dir):
+            return discovered
+        for name in sorted(os.listdir(models_dir)):
+            folder = os.path.join(models_dir, name)
+            model_path = os.path.join(folder, "model.tflite")
+            if not os.path.isfile(model_path):
+                continue
+            scaler_path = None
+            for candidate in ("scaler.json", "scaler.npz", "scalar.json"):
+                p = os.path.join(folder, candidate)
+                if os.path.isfile(p):
+                    scaler_path = p
+                    break
+            if scaler_path is None:
+                continue
+            discovered[name] = (model_path, scaler_path)
+        return discovered
+
+    def on_model_choice_selected(self, event=None):
+        name = self.model_choice_var.get()
+        entry = self.available_models.get(name)
+        if entry is None:
+            return
+        model_path, scaler_path = entry
+        self.model_path_var.set(model_path)
+        self.scaler_path_var.set(scaler_path)
+        self.log(f"Selected model: {name}")
+
     def load_model_dialog(self):
         path = filedialog.askopenfilename(filetypes=[("TFLite Models", "*.tflite")])
         if path:
             self.model_path_var.set(path)
-            
+
     def load_scaler_dialog(self):
         path = filedialog.askopenfilename(filetypes=[("NPZ Files", "*.npz")])
         if path:

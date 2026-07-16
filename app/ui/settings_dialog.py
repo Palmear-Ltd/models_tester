@@ -42,20 +42,30 @@ class SettingsDialog:
         notebook.add(tab, text="Model & Scaler")
         tab.columnconfigure(1, weight=1)
 
-        ttk.Label(tab, text="Model Path (.tflite):").grid(row=0, column=0, sticky="w", pady=5)
-        ttk.Entry(tab, textvariable=app.model_path_var).grid(row=0, column=1, padx=5, sticky="ew")
-        ttk.Button(tab, text="Browse", command=app.load_model_dialog).grid(row=0, column=2)
+        ttk.Label(tab, text="Model:").grid(row=0, column=0, sticky="w", pady=5)
+        model_names = sorted(app.available_models.keys())
+        model_combo = ttk.Combobox(
+            tab, textvariable=app.model_choice_var, values=model_names, state="readonly"
+        )
+        model_combo.grid(row=0, column=1, padx=5, sticky="ew")
+        model_combo.bind("<<ComboboxSelected>>", app.on_model_choice_selected)
+        if not model_names:
+            model_combo.configure(state="disabled")
 
-        ttk.Label(tab, text="Scaler Path (.json/.npz):").grid(row=1, column=0, sticky="w", pady=5)
-        ttk.Entry(tab, textvariable=app.scaler_path_var).grid(row=1, column=1, padx=5, sticky="ew")
-        ttk.Button(tab, text="Browse", command=app.load_scaler_dialog).grid(row=1, column=2)
+        ttk.Label(tab, text="Model Path (.tflite):").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Entry(tab, textvariable=app.model_path_var).grid(row=1, column=1, padx=5, sticky="ew")
+        ttk.Button(tab, text="Browse", command=app.load_model_dialog).grid(row=1, column=2)
 
-        ttk.Label(tab, text="Calibration Profile (.json):").grid(row=2, column=0, sticky="w", pady=5)
-        ttk.Entry(tab, textvariable=app.calibration_profile_path_var).grid(row=2, column=1, padx=5, sticky="ew")
-        ttk.Button(tab, text="Browse", command=app.browse_calibration_profile).grid(row=2, column=2)
+        ttk.Label(tab, text="Scaler Path (.json/.npz):").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Entry(tab, textvariable=app.scaler_path_var).grid(row=2, column=1, padx=5, sticky="ew")
+        ttk.Button(tab, text="Browse", command=app.load_scaler_dialog).grid(row=2, column=2)
+
+        ttk.Label(tab, text="Calibration Profile (.json):").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Entry(tab, textvariable=app.calibration_profile_path_var).grid(row=3, column=1, padx=5, sticky="ew")
+        ttk.Button(tab, text="Browse", command=app.browse_calibration_profile).grid(row=3, column=2)
         ttk.Button(
             tab, text="Generate from recordings…", command=app.generate_calibration_profile
-        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=5)
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=5)
 
     def _build_acquisition_tab(self, notebook):
         app = self.app
