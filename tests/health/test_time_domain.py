@@ -182,6 +182,34 @@ def test_dropout_fails_when_ratio_exceeds_fault_threshold():
 
 
 # T009 ClickTransientCheck
+#
+# Defaults recalibrated 2026-07-16 (docs/superpowers/specs/
+# 2026-07-16-rootcause-threshold-recalibration-design.md): the old warn_count=3/
+# fault_count=15 sat well inside the noise floor of genuinely healthy piezo
+# contact (a quarter of clean reference windows already cleared WARN). New
+# defaults (warn_count=15, fault_count=30) are loaded from
+# app/health/check_thresholds.json via app.health.config, NOT the bare class
+# constructor default below -- these tests exercise the check directly with
+# explicit values so they don't depend on that file's contents.
+NEW_WARN_COUNT = 15
+NEW_FAULT_COUNT = 30
+
+
+def _click_burst(n_clicks, n=N, amp=0.3, start=1000, spike=1.0):
+    """A sine carrier with `n_clicks` isolated single-sample spikes, spaced far
+    enough apart (> merge_gap) to register as that many separate click events."""
+    x = _sine(amp=amp, n=n)
+    if n_clicks <= 0:
+        return x
+    spacing = max(4, (n - start - 1) // n_clicks)
+    for i in range(n_clicks):
+        idx = start + i * spacing
+        if idx >= n:
+            break
+        x[idx] = spike
+    return x
+
+
 def test_click_category_is_primary():
     assert ClickTransientCheck().category is CheckCategory.PRIMARY
 
@@ -190,18 +218,18 @@ def test_click_warns_on_sparse_isolated_spikes():
     x = _sine(amp=0.3)
     for idx in (10000, 30000, 60000, 90000):  # far apart -> 4 separate events
         x[idx] = 1.0
-    result = ClickTransientCheck().run(_win(x), {})
+    result = ClickTransientCheck(warn_count=4, fault_count=30).run(_win(x), {})
     assert result.status is CheckStatus.WARNING
     assert _measure(result, "click_count") == 4
 
 
 def test_click_fails_on_dense_spikes():
     x = _sine(amp=0.3)
-    for i in range(20):  # 20 spikes, spaced far enough apart to stay separate events
-        x[1000 + i * 5000] = 1.0
+    for i in range(35):  # spaced far enough apart to stay separate events
+        x[1000 + i * 3000] = 1.0
     result = ClickTransientCheck().run(_win(x), {})
     assert result.status is CheckStatus.FAIL
-    assert _measure(result, "click_count") >= 15
+    assert _measure(result, "click_count") >= NEW_FAULT_COUNT
 
 
 def test_click_passes_on_full_silence():
@@ -213,3 +241,39 @@ def test_click_passes_on_full_silence():
 def test_click_passes_on_clean_sine():
     result = ClickTransientCheck().run(_win(_sine(amp=0.3)), {})
     assert result.status is CheckStatus.PASS
+
+
+# --- recalibration: synthetic click-bursts straddling old (3/15) vs new
+# (15/30) thresholds, using the constructor defaults directly. ---
+
+
+def test_click_passes_below_new_warn_threshold():
+    # 10 clicks: PASS under the new default (warn_count=15), but would have
+    # been WARNING under the old default (warn_count=3) -- this is the
+    # concrete case the recalibration fixes.
+    x = _click_burst(10)
+    result = ClickTransientCheck().run(_win(x), {})
+    assert result.status is CheckStatus.PASS
+    assert _measure(result, "click_count") == 10
+
+
+def test_click_warns_between_new_warn_and_fault_thresholds():
+    # 20 clicks: between the new warn_count=15 and fault_count=30 -> WARNING.
+    x = _click_burst(20)
+    result = ClickTransientCheck().run(_win(x), {})
+    assert result.status is CheckStatus.WARNING
+    assert _measure(result, "click_count") == 20
+
+
+def test_click_fails_at_or_above_new_fault_threshold():
+    # 35 clicks: at/above the new fault_count=30 -> FAIL.
+    x = _click_burst(35)
+    result = ClickTransientCheck().run(_win(x), {})
+    assert result.status is CheckStatus.FAIL
+    assert _measure(result, "click_count") == 35
+
+
+def test_click_new_defaults_are_15_and_30():
+    check = ClickTransientCheck()
+    assert check.warn_count == NEW_WARN_COUNT
+    assert check.fault_count == NEW_FAULT_COUNT

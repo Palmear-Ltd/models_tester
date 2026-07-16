@@ -36,8 +36,11 @@ optional, additive, never state-changing.
 """
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Optional
 
 from app.health.models import CheckStatus
 
@@ -82,6 +85,61 @@ _WEIGHT_TABLE: dict = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Session-level decision config (Bug 2 fix, spec 2026-07-16): `assess_many`
+# used to fire SENSOR_LINK on ANY positive combined score summed across a
+# ~40-window session, with confidence saturating via MAX_SCORE (a PER-WINDOW
+# cap) applied to that sum. The fix scores a session by its MEAN per-window
+# score (combined_score / windows considered) -- dimensionally comparable to
+# a single window's score again -- and requires it to clear a persisted,
+# data-driven cutoff before declaring SENSOR_LINK, instead of merely being
+# positive. Mirrors app/decision/threshold.py's ThresholdConfig/
+# default_config() idiom: a frozen JSON file is the source of truth if
+# present, with a hardcoded fallback if it's missing.
+#
+# The cutoff below was fit informally (n=12: the 4 local TN clean reference
+# recordings in test_data/F + the 8 confirmed-fault recordings in
+# test_data/audio_signal_health/fp/F, replayed through the *new* per-check
+# thresholds) -- good enough to stop "saturates on everything," not a
+# statistically rigorous cutoff. See docs/superpowers/specs/
+# 2026-07-16-rootcause-threshold-recalibration-design.md for the replay
+# numbers. Retune by editing rootcause_session_config.json, no code change
+# needed.
+DEFAULT_SESSION_CUTOFF = 0.25
+
+DEFAULT_SESSION_CONFIG_PATH = os.path.join(
+    os.path.dirname(__file__), "rootcause_session_config.json"
+)
+
+
+@dataclass(frozen=True)
+class RootCauseSessionConfig:
+    cutoff: float = DEFAULT_SESSION_CUTOFF
+
+    def to_json(self) -> str:
+        return json.dumps({"method": "mean_score", "cutoff": self.cutoff})
+
+    @staticmethod
+    def from_json(text: str) -> "RootCauseSessionConfig":
+        data = json.loads(text)
+        return RootCauseSessionConfig(cutoff=float(data["cutoff"]))
+
+
+def default_session_config(path: Optional[str] = None) -> RootCauseSessionConfig:
+    """Loads a persisted session-cutoff JSON if present, otherwise falls back to
+    the shipped default. Never raises -- a missing/unreadable/malformed file
+    just means "use the shipped default," same as
+    app/decision/threshold.py's default_config()."""
+    resolved = path if path is not None else DEFAULT_SESSION_CONFIG_PATH
+    if resolved is not None and os.path.exists(resolved):
+        try:
+            with open(resolved, "r", encoding="utf-8") as f:
+                return RootCauseSessionConfig.from_json(f.read())
+        except (OSError, ValueError, KeyError):
+            pass
+    return RootCauseSessionConfig()
+
+
 def _score(executed: list):
     """Score one window's worth of executed check results.
 
@@ -118,9 +176,18 @@ def _finalize(
     contributors: list,
     has_non_pass: bool,
     *,
+    threshold: float = 0.0,
     calibration_evaluation=None,
     anomaly_result=None,
 ) -> RootCauseAssessment:
+    """`threshold` is the bar `score` must clear (strictly) to declare
+    SENSOR_LINK. Single-window callers (`assess_results`/`assess`) leave it at
+    the default 0.0 -- any positive single-window score is meaningful on its
+    own, MAX_SCORE is defined as exactly that window's own ceiling. Session
+    callers (`assess_many`) pass a persisted, data-driven cutoff instead,
+    since summed/averaged evidence across many windows needs a floor above
+    the noise a genuinely healthy session still produces (see
+    RootCauseSessionConfig)."""
     if not has_non_pass:
         # NONE reads as "healthy" -- a confident verdict, not a low-confidence
         # guess -- so confidence is 1.0, not 0.0.
@@ -128,9 +195,11 @@ def _finalize(
         confidence = 1.0
         contributing_check_ids: list = []
         explanation = "No signal health issues were detected in this recording; it looks healthy."
-    elif score <= 0.0:
-        # Some check(s) fired, but none of them indicate a sensor-link fault
-        # (e.g. only a check this module ignores) -- an honest hedge.
+    elif score <= threshold:
+        # Some check(s) fired, but not enough to indicate a sensor-link fault
+        # (either nothing in the weight table fired at all, or -- for a
+        # session -- the fired checks didn't clear the session floor) -- an
+        # honest hedge.
         primary_cause = RootCause.UNKNOWN
         confidence = 0.0
         contributing_check_ids = []
@@ -186,18 +255,26 @@ def assess_results(
     )
 
 
-def assess_many(reports) -> RootCauseAssessment:
+def assess_many(reports, *, session_config: Optional[RootCauseSessionConfig] = None) -> RootCauseAssessment:
     """Assess a multi-window capture (Validate Acquisition's ~40 windows).
 
-    Sums the score across ALL reports (not just the last window) before
-    deciding, so one noisy window does not dominate a ~20s capture -- a
-    persistent pattern recurring across many windows accumulates a much
-    larger cumulative score than a single one-off spike. Only reports whose
-    checks executed are considered; the rest are skipped entirely.
+    Sums the score across ALL reports (not just the last window), then
+    normalizes by the number of windows considered into a session MEAN score
+    -- so one noisy window does not dominate a ~20s capture, but the result
+    stays on the same 0..MAX_SCORE scale as a single window's score instead
+    of growing without bound as the session gets longer. A persistent
+    pattern recurring across many windows still produces a higher mean than
+    a single one-off spike (more windows clear the per-window threshold), it
+    just no longer saturates confidence at 1.0 on every session regardless of
+    true fault rate. The mean must clear a persisted, data-driven session
+    cutoff (`session_config`, defaults to `default_session_config()`) to
+    declare SENSOR_LINK -- replacing the old "any positive sum" rule. Only
+    reports whose checks executed are considered; the rest are skipped
+    entirely.
     """
     combined_score = 0.0
     combined_contributors: list = []
-    any_considered = False
+    windows_considered = 0
     any_has_non_pass = False
     last_calibration_evaluation = None
     last_anomaly_result = None
@@ -207,7 +284,7 @@ def assess_many(reports) -> RootCauseAssessment:
         executed = [r for r in results if r.executed]
         if not executed:
             continue
-        any_considered = True
+        windows_considered += 1
         score, contributors, has_non_pass = _score(executed)
         if has_non_pass:
             any_has_non_pass = True
@@ -220,7 +297,7 @@ def assess_many(reports) -> RootCauseAssessment:
         if anomaly is not None:
             last_anomaly_result = anomaly
 
-    if not any_considered:
+    if windows_considered == 0:
         return RootCauseAssessment(
             primary_cause=RootCause.UNKNOWN,
             confidence=0.0,
@@ -228,10 +305,14 @@ def assess_many(reports) -> RootCauseAssessment:
             contributing_check_ids=[],
         )
 
+    mean_score = combined_score / windows_considered
+    cutoff = (session_config if session_config is not None else default_session_config()).cutoff
+
     return _finalize(
-        combined_score,
+        mean_score,
         combined_contributors,
         any_has_non_pass,
+        threshold=cutoff,
         calibration_evaluation=last_calibration_evaluation,
         anomaly_result=last_anomaly_result,
     )

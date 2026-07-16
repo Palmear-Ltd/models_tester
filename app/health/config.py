@@ -11,6 +11,8 @@ Phase 3 concern.
 """
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -101,6 +103,58 @@ class HealthConfig:
         return cc.enabled if cc else True
 
 
+# Persisted per-check threshold overrides (spec: docs/superpowers/specs/
+# 2026-07-16-rootcause-threshold-recalibration-design.md). This JSON file is
+# the source of truth at runtime; the dict below is only the shipped-in-code
+# fallback used if the file is missing/unreadable/malformed -- loading must
+# NEVER raise, mirroring app/decision/threshold.py's default_config() idiom
+# (frozen JSON if present, else a hardcoded default). Only entries that
+# differ from a check's class-constructor defaults need to be present in the
+# file; both currently agree (the constructor defaults were updated to match
+# as the primary fix -- this file lets them be retuned without a code change).
+DEFAULT_CHECK_THRESHOLDS_PATH = os.path.join(
+    os.path.dirname(__file__), "check_thresholds.json"
+)
+
+_SHIPPED_CHECK_THRESHOLD_DEFAULTS: dict[str, dict] = {
+    "T009": {"warn_count": 15, "fault_count": 30},
+}
+
+
+def load_check_thresholds(path: Optional[str] = None) -> dict[str, dict]:
+    """Load per-check constructor-param overrides from a persisted JSON config.
+
+    ``{"T009": {"warn_count": 15, "fault_count": 30}, ...}`` -- only checks
+    that need a non-default value need an entry. Falls back to the shipped
+    defaults (never raises) if the file is absent, unreadable, or malformed.
+    """
+    resolved = path if path is not None else DEFAULT_CHECK_THRESHOLDS_PATH
+    try:
+        with open(resolved, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except (OSError, ValueError):
+        pass
+    return {k: dict(v) for k, v in _SHIPPED_CHECK_THRESHOLD_DEFAULTS.items()}
+
+
+def _apply_check_thresholds(config: HealthConfig, thresholds: dict[str, dict]) -> HealthConfig:
+    """Merge persisted threshold overrides into a HealthConfig in place.
+
+    An explicit profile-level CheckConfig (e.g. production's F004
+    enabled=False) always wins for fields it sets; params from the persisted
+    file only fill in what the profile didn't already specify.
+    """
+    for check_id, params in thresholds.items():
+        existing = config.checks.get(check_id)
+        if existing is not None:
+            existing.params = {**params, **existing.params}
+        else:
+            config.checks[check_id] = CheckConfig(params=dict(params))
+    return config
+
+
 def build_manager(config: HealthConfig) -> SignalCheckManager:
     """Register every active check (in registry order) into a fresh manager."""
     manager = SignalCheckManager()
@@ -122,7 +176,7 @@ PROFILES = ("development", "production", "diagnostic", "minimal")
 
 
 def _profile_configs() -> dict:
-    return {
+    configs = {
         # All checks enabled (categories default to enabled when unset).
         "development": HealthConfig(profile="development"),
         # Same check set as development; differs only in logging verbosity (Phase 6).
@@ -137,6 +191,10 @@ def _profile_configs() -> dict:
             categories={"time_domain": False, "frequency_domain": False, "stability": False},
         ),
     }
+    thresholds = load_check_thresholds()
+    for config in configs.values():
+        _apply_check_thresholds(config, thresholds)
+    return configs
 
 
 def config_for_profile(name: str) -> HealthConfig:

@@ -400,8 +400,13 @@ class ClickTransientCheck(SignalHealthCheck):
         self,
         click_k: float = 8.0,
         merge_gap: int = 3,
-        warn_count: int = 3,
-        fault_count: int = 15,
+        # Recalibrated 2026-07-16 (was warn_count=3/fault_count=15, which sat
+        # well inside the noise floor of genuinely healthy piezo contact --
+        # see docs/superpowers/specs/2026-07-16-rootcause-threshold-recalibration-design.md).
+        # These are also the shipped fallback if app/health/check_thresholds.json
+        # is missing; the file is the actual source of truth at runtime.
+        warn_count: int = 15,
+        fault_count: int = 30,
     ):
         self.click_k = click_k
         self.merge_gap = merge_gap

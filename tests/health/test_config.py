@@ -99,3 +99,59 @@ def test_pipeline_for_profile_minimal_faults_on_silence():
     )
     assert report.final_state is HealthState.FAULT
     assert len(report.check_results) == 3
+
+
+# ---------------------------------------------------------------------------
+# Persisted check-threshold overrides (app/health/check_thresholds.json)
+# ---------------------------------------------------------------------------
+
+from app.health.checks.time_domain import ClickTransientCheck  # noqa: E402
+from app.health.config import load_check_thresholds  # noqa: E402
+
+
+def test_load_check_thresholds_reads_shipped_repo_file():
+    # No path given -> resolves the repo-committed app/health/check_thresholds.json.
+    thresholds = load_check_thresholds()
+    assert thresholds["T009"] == {"warn_count": 15, "fault_count": 30}
+
+
+def test_load_check_thresholds_falls_back_when_file_missing(tmp_path):
+    missing = tmp_path / "does_not_exist.json"
+    thresholds = load_check_thresholds(str(missing))
+    # Never raises; falls back to the shipped-in-code defaults.
+    assert thresholds["T009"] == {"warn_count": 15, "fault_count": 30}
+
+
+def test_load_check_thresholds_falls_back_on_malformed_json(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not valid json", encoding="utf-8")
+    thresholds = load_check_thresholds(str(bad))
+    assert thresholds["T009"] == {"warn_count": 15, "fault_count": 30}
+
+
+def test_load_check_thresholds_reads_custom_file(tmp_path):
+    custom = tmp_path / "custom.json"
+    custom.write_text('{"T009": {"warn_count": 7, "fault_count": 21}}', encoding="utf-8")
+    thresholds = load_check_thresholds(str(custom))
+    assert thresholds["T009"] == {"warn_count": 7, "fault_count": 21}
+
+
+def test_profile_configs_apply_check_thresholds_with_no_call_site_changes():
+    # config_for_profile("development") / pipeline_for_profile(...) take no new
+    # argument -- the persisted thresholds must be picked up automatically.
+    cfg = config_for_profile("development")
+    assert cfg.checks["T009"].params == {"warn_count": 15, "fault_count": 30}
+    manager = build_manager(cfg)
+    click_check = next(c for c in manager.checks if c.check_id == "T009")
+    assert isinstance(click_check, ClickTransientCheck)
+    assert click_check.warn_count == 15
+    assert click_check.fault_count == 30
+
+
+def test_profile_configs_check_thresholds_do_not_clobber_existing_overrides():
+    # production disables F004 via an explicit CheckConfig(enabled=False) --
+    # applying persisted thresholds must not stomp on that (F004 has no
+    # persisted threshold entry, but this guards the merge logic generally:
+    # an explicit profile-level CheckConfig for a check_id must survive).
+    cfg = config_for_profile("production")
+    assert cfg.checks["F004"].enabled is False
