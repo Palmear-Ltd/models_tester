@@ -33,6 +33,7 @@ from app.decision.threshold import EwmaPeakDecision, default_config as default_d
 
 SAMPLE_RATE = 44100  # acquisition sample rate (Hz); the whole pipeline runs at this rate
 VALIDATION_WINDOWS = 40  # ~20 s of validation at 0.5 s per window
+USER_SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_settings.json")
 
 # Try to import TFLite Interpreter
 try:
@@ -144,7 +145,8 @@ class ModelsTesterApp:
         self.decision_accumulator = None
 
         self._setup_ui()
-        
+        self._load_settings()
+
     def _setup_ui(self):
         # Styles
         style = ttk.Style()
@@ -160,9 +162,10 @@ class ModelsTesterApp:
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="Settings", command=self.open_prep_settings)
         file_menu.add_separator()
-        file_menu.add_command(label="Close", command=self.root.destroy)
+        file_menu.add_command(label="Close", command=self._on_close)
         menubar.add_cascade(label="File", menu=file_menu)
         self.root.config(menu=menubar)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         dark_mode = self._is_dark_mode()
         if dark_mode:
@@ -706,6 +709,107 @@ class ModelsTesterApp:
             
         self.root.after(100, self.process_queue)
         
+    def _settings_spec(self):
+        """(key, tk Variable) pairs that can be persisted with a plain .get()/.set() —
+        i.e. no side effects needed on restore. Settings that trigger follow-up work
+        (device list, model paths, health pipeline, calibration profile) are handled
+        separately in _save_settings/_load_settings."""
+        return [
+            ("use_filter", self.use_filter_var),
+            ("low_cut", self.low_cut_var),
+            ("up_cut", self.up_cut_var),
+            ("sub_win_size", self.sub_win_size_var),
+            ("fmin", self.fmin_var),
+            ("fmax", self.fmax_var),
+            ("sub_hop_size", self.sub_hop_size_var),
+            ("n_mels", self.n_mels_var),
+            ("seq_len", self.seq_len_var),
+            ("inference_mode", self.inference_mode_var),
+            ("save_results", self.save_results_var),
+            ("user_label", self.user_label_var),
+            ("output_dir", self.output_dir_var),
+            ("duration", self.duration_var),
+            ("score_thresh", self.score_thresh_var),
+        ]
+
+    def _save_settings(self):
+        data = {key: var.get() for key, var in self._settings_spec()}
+        data["input_type"] = self.input_type_var.get()
+        data["device"] = self.device_var.get()
+        data["model_choice"] = self.model_choice_var.get()
+        data["health_profile"] = self.profile_var.get()
+        data["calibration_profile_path"] = self.calibration_profile_path_var.get()
+        data["window_geometry"] = self.root.geometry()
+        try:
+            with open(USER_SETTINGS_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            self.log(f"Failed to save settings: {e}")
+
+    def _load_settings(self):
+        if not os.path.isfile(USER_SETTINGS_PATH):
+            return
+        try:
+            with open(USER_SETTINGS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            self.log(f"Failed to load saved settings: {e}")
+            return
+
+        for key, var in self._settings_spec():
+            if key in data:
+                try:
+                    var.set(data[key])
+                except Exception:
+                    pass
+
+        try:
+            input_type = data.get("input_type")
+            if input_type:
+                self.input_type_var.set(input_type)
+            # refresh_devices() resets device_var to index 0 in mic mode, so the
+            # saved device must be applied after it, not before.
+            self.refresh_devices()
+            device = data.get("device")
+            if device:
+                self.device_var.set(device)
+        except Exception as e:
+            self.log(f"Failed to restore saved input device: {e}")
+
+        try:
+            model_choice = data.get("model_choice")
+            if model_choice and model_choice in self.available_models:
+                self.model_choice_var.set(model_choice)
+                self.on_model_choice_selected()
+        except Exception as e:
+            self.log(f"Failed to restore saved model choice: {e}")
+
+        try:
+            health_profile = data.get("health_profile")
+            if health_profile and health_profile in PROFILES:
+                self.profile_var.set(health_profile)
+                self._rebuild_health_pipeline()
+        except Exception as e:
+            self.log(f"Failed to restore saved health profile: {e}")
+
+        try:
+            cal_path = data.get("calibration_profile_path")
+            if cal_path and os.path.isfile(cal_path):
+                self._load_calibration_profile(cal_path)
+        except Exception as e:
+            self.log(f"Failed to restore saved calibration profile: {e}")
+
+        geometry = data.get("window_geometry")
+        if geometry:
+            try:
+                self.root.geometry(geometry)
+            except Exception:
+                pass
+
+    def _on_close(self):
+        self._save_settings()
+        self.root.destroy()
+
     def _rebuild_health_pipeline(self):
         self.health_pipeline = pipeline_for_profile(
             self.profile_var.get(), calibration_profile=self.calibration_profile

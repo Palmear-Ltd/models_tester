@@ -22,6 +22,9 @@ env/
 .DS_Store
 Thumbs.db
 
+# Per-machine UI settings (persisted by the tester app, not project config)
+user_settings.json
+
 # Output directories
 output/
 models/*/output/
