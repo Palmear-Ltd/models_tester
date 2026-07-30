@@ -270,12 +270,7 @@ def test_assess_many_occasional_isolated_warning_is_not_sensor_link():
 def test_assess_many_persistent_fault_pattern_is_sensor_link():
     # A T009 WARNING recurring across most of the session -- a persistent
     # pattern, not a one-off blip. mean_score = 30*1.0/40 = 0.75, clearly over
-    # the default cutoff (0.55 -- see DEFAULT_SESSION_CUTOFF's docstring for
-    # why it's this high: it's fit against real sessions, whose first ~4
-    # windows carry a startup-buffer artifact that inflates every session's
-    # floor, clean or faulty; these synthetic FakeReport sessions don't
-    # reproduce that artifact, so the bad-window fraction has to clear the
-    # same bar on its own).
+    # the default cutoff (0.25 -- see DEFAULT_SESSION_CUTOFF's docstring).
     session = [_healthy_window() for _ in range(10)] + [
         _isolated_warning_window() for _ in range(30)
     ]
@@ -388,20 +383,19 @@ def _load_wav(path):
 
 
 def _session_audio_windows(signal, sample_rate=_CORPUS_SR):
-    """Reproduces main.py's live sliding-window scheme exactly (handle_audio_chunk,
-    main.py:890-901) -- NOT a bare non-overlapping slice of the raw file. A
-    persistent buffer is zero-initialized like a freshly started session, then
-    updated every 0.5s hop via np.roll (tail hop zero-padded rather than
-    dropped), so the first ~4 windows of every real session are built from a
-    buffer that's still mostly/partly exact zero. This is also exactly what
-    offline_score.py's score_wav_file() does -- its docstring calls it out as
-    the documented canonical replication of main.py's windowing, adapted here
-    to yield AudioWindow objects for the health pipeline instead of running
-    inference. Using a naive non-overlapping slice (as an earlier version of
-    this test did, via app.health.calibration.iter_windows) understates the
-    session length (36 windows instead of 40 for a 20s file) and skips the
-    zero-buffer warmup entirely -- which turned out to matter (see
-    DEFAULT_SESSION_CUTOFF's docstring in rootcause.py)."""
+    """Reproduces main.py's live sliding-window scheme exactly (handle_audio_chunk),
+    NOT a bare non-overlapping slice of the raw file. A persistent buffer is
+    zero-initialized like a freshly started session, then updated every 0.5s
+    hop via np.roll (tail hop zero-padded rather than dropped). No window is
+    yielded until the buffer has filled once with real audio -- main.py and
+    offline_score.py's score_wav_file() (the documented canonical
+    replication) both hold inference/analysis until then, so the first ~4
+    hops of every real session (built from a still mostly/partly exact-zero
+    buffer) are skipped entirely rather than analyzed. Using a naive
+    non-overlapping slice (as an earlier version of this test did, via
+    app.health.calibration.iter_windows) would also understate the session
+    length (36 windows instead of 40 hops for a 20s file, though here the
+    hold-off independently arrives at 36 by skipping the leading 4 of 40)."""
     from app.health.models import AudioWindow
 
     block_size = int(sample_rate * _CORPUS_HOP_SEC)
@@ -410,6 +404,7 @@ def _session_audio_windows(signal, sample_rate=_CORPUS_SR):
     n_hops = math.ceil(total_samples / block_size) if total_samples > 0 else 0
 
     buffer = np.zeros(buffer_len, dtype=np.float32)
+    samples_received = 0
     for hop in range(n_hops):
         start = hop * block_size
         end = min(start + block_size, total_samples)
@@ -418,6 +413,9 @@ def _session_audio_windows(signal, sample_rate=_CORPUS_SR):
             chunk = np.pad(chunk, (0, block_size - len(chunk)))
         buffer = np.roll(buffer, -block_size)
         buffer[-block_size:] = chunk
+        samples_received = min(buffer_len, samples_received + block_size)
+        if samples_received < buffer_len:
+            continue
         yield AudioWindow(samples=buffer.copy(), sample_rate=sample_rate)
 
 

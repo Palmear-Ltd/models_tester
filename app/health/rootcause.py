@@ -97,40 +97,38 @@ _WEIGHT_TABLE: dict = {
 # default_config() idiom: a frozen JSON file is the source of truth if
 # present, with a hardcoded fallback if it's missing.
 #
-# The cutoff below was fit informally (n=12: the 4 local TN clean reference
-# recordings in test_data/F + the 8 confirmed-fault recordings in
-# test_data/audio_signal_health/fp/F, replayed through the *new* per-check
-# thresholds) -- good enough to stop "saturates on everything," not a
-# statistically rigorous cutoff. See docs/superpowers/specs/
-# 2026-07-16-rootcause-threshold-recalibration-design.md for the replay
+# The cutoff below was refit 2026-07-30 (n=12, same corpora as before: the 4
+# local TN clean reference recordings in test_data/F + the 8 confirmed-fault
+# recordings in test_data/audio_signal_health/fp/F) after main.py/
+# offline_score.py's handle_audio_chunk / score_wav_file were changed to hold
+# inference and health analysis until the rolling 2.5s buffer has filled once
+# with real audio, eliminating the zero-padded-warmup artifact described
+# below that the *previous* cutoff (0.55) had to be fit around. See
+# docs/superpowers/specs/2026-07-30-rootcause-cutoff-refit.md for the replay
 # numbers. Retune by editing rootcause_session_config.json, no code change
 # needed.
 #
 # IMPORTANT: fit against the REAL session windowing (a persistent 2.5s
 # buffer, zero-initialized like a freshly started session, rolled+updated
-# every 0.5s hop -- see main.py:handle_audio_chunk / offline_score.py's
-# score_wav_file(), the documented canonical replication), NOT a bare
-# non-overlapping slice of the raw file. Every real session's first ~4
-# windows are built from a buffer that is mostly/partly exact zero (the
-# startup buffer hasn't filled with real audio yet), and the corrected
-# replay showed this isn't just cosmetic: the hard zero->signal edge inside
-# that partially-zero window makes ClickTransientCheck's MAD-based sigma
-# (computed from the whole window's sample-diffs, dominated by exact-zero
-# diffs in the padded region) collapse to a tiny value, so the ordinary,
-# non-anomalous audio in the *real* portion of that same window trips the
-# click threshold thousands of times over -- and the zero-padded run itself
-# also reads as a genuine dropout to T008/S004. This inflates the mean score
-# of EVERY session (clean or faulty) by a roughly constant amount in its
-# first few windows, raising the floor this cutoff has to clear. It was
-# accounted for empirically here (the cutoff is fit against sessions that
-# include this artifact), but the artifact itself is not fixed by this
-# change -- if a future recalibration needs a lower cutoff (e.g. once a
-# finer-grained calibration profile exists) and can't get clean separation,
-# this warmup-window distortion is the first thing to fix, e.g. by warming
-# the buffer with the first real audio instead of zeros, or having
-# ClickTransientCheck/DropoutSegmentCheck exclude a leading exact-zero run
-# from their statistics.
-DEFAULT_SESSION_CUTOFF = 0.55
+# every 0.5s hop, with no window scored/analyzed until the buffer fills --
+# see main.py:handle_audio_chunk / offline_score.py's score_wav_file(), the
+# documented canonical replication), NOT a bare non-overlapping slice of the
+# raw file.
+#
+# With the warmup artifact gone, session mean-scores no longer share a
+# roughly-constant inflated floor, but the underlying per-check signal is
+# still noisy at this sample size: 2 of the 8 confirmed-fault recordings and
+# 2 of the 4 clean recordings tie at the same minimum mean score (0.0556), so
+# no cutoff cleanly separates the two groups. 0.25 sits in the widest gap in
+# the sorted score list (0.2222 clean-side / 0.3333 fault-side) and was
+# chosen to avoid reintroducing false positives on clean recordings -- the
+# original bug this module was recalibrated for (2026-07-16) was firing on
+# EVERY session, so this refit is deliberately biased toward not over-firing
+# again over maximizing fault recall. That yields 5/8 fault recordings
+# correctly resolving SENSOR_LINK (comfortably above the "mostly" >= 4/8 test
+# bar) and 4/4 clean recordings NOT resolving SENSOR_LINK. Informal, not a
+# statistically rigorous cutoff -- same caveat as the 0.55 value it replaces.
+DEFAULT_SESSION_CUTOFF = 0.25
 
 DEFAULT_SESSION_CONFIG_PATH = os.path.join(
     os.path.dirname(__file__), "rootcause_session_config.json"
