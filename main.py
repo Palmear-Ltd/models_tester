@@ -557,6 +557,7 @@ class ModelsTesterApp:
         self._last_root_cause = None
         self.start_time = time.time()
         self.session_buffer = np.zeros(int(44100 * self.duration_var.get()), dtype=np.float32)
+        self._session_samples_received = 0
         self.collected_audio_chunks = []
         self.final_audio_clip = None
         self.single_shot_processed = False
@@ -1017,29 +1018,41 @@ class ModelsTesterApp:
         if not hasattr(self, 'session_buffer'):
             buffer_len = int(44100 * self.duration_var.get())
             self.session_buffer = np.zeros(buffer_len, dtype=np.float32)
-            
+            self._session_samples_received = 0
+
         # Shift and append
         chunk_flat = chunk.flatten()
         chunk_len = len(chunk_flat)
-        
+
         self.session_buffer = np.roll(self.session_buffer, -chunk_len)
         self.session_buffer[-chunk_len:] = chunk_flat
-        
+        self._session_samples_received = min(
+            len(self.session_buffer), self._session_samples_received + chunk_len
+        )
+
         # Save snapshot for plotting
         self.raw_audio_snapshot = self.session_buffer.copy()
 
+        # Hold everything below (inference, health/rootcause) until the rolling
+        # buffer has filled once with real audio — otherwise the leading windows
+        # are built from a mostly-zero buffer, which both skews early inference
+        # and (see rootcause.py's DEFAULT_SESSION_CUTOFF comment) creates a hard
+        # zero->signal edge that spuriously trips click/dropout checks.
+        buffer_full = self._session_samples_received >= len(self.session_buffer)
+
         # Audio signal health monitoring — additive; never blocks or alters inference.
-        try:
-            window = AudioWindow(samples=self.session_buffer, sample_rate=SAMPLE_RATE)
-            self.latest_health_report = self.health_pipeline.analyze(window)
-            self._update_health_indicator(self.latest_health_report)
-            if self._validating and self.latest_health_report is not None:
-                self._validation_reports.append(self.latest_health_report)
-                if len(self._validation_reports) >= VALIDATION_WINDOWS:
-                    self._validating = False
-                    self._show_validation_result()
-        except Exception as e:
-            self.log(f"Health monitoring error: {e}")
+        if buffer_full:
+            try:
+                window = AudioWindow(samples=self.session_buffer, sample_rate=SAMPLE_RATE)
+                self.latest_health_report = self.health_pipeline.analyze(window)
+                self._update_health_indicator(self.latest_health_report)
+                if self._validating and self.latest_health_report is not None:
+                    self._validation_reports.append(self.latest_health_report)
+                    if len(self._validation_reports) >= VALIDATION_WINDOWS:
+                        self._validating = False
+                        self._show_validation_result()
+            except Exception as e:
+                self.log(f"Health monitoring error: {e}")
 
         if self.inference_mode_var.get() == "single":
             self.collected_audio_chunks.append(chunk_flat.copy())
@@ -1049,7 +1062,7 @@ class ModelsTesterApp:
             self.energy_bar["value"] = min(rms * 100, 100)
             curr_time = time.time() - self.start_time
             self.energy_history.append((curr_time, rms))
-        else:
+        elif buffer_full:
             # Sliding-window behavior
             self.run_inference(self.session_buffer)
 

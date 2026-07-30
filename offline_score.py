@@ -3,10 +3,15 @@
 
 Offline counterpart to main.py's live sliding-window scoring loop
 (main.py:834-873 `handle_audio_chunk`, main.py:588-622 `file_loop`) — replicates it
-exactly (2.5s rolling buffer, 0.5s hop, zero-padded tail chunk) so a decision rule
-validated against this script's output transfers unmodified to the live app. WAV I/O
-(soundfile/librosa) and TFLite inference live here, not in app/decision, mirroring
-calibrate.py's split between root-level I/O scripts and the portable app/ package.
+exactly (2.5s rolling buffer, 0.5s hop, zero-padded tail chunk, held until the buffer
+has filled once with real audio) so a decision rule validated against this script's
+output transfers unmodified to the live app. WAV I/O (soundfile/librosa) and TFLite
+inference live here, not in app/decision, mirroring calibrate.py's split between
+root-level I/O scripts and the portable app/ package.
+
+Note: files shorter than WINDOW_SEC (2.5s) now yield zero scores -- the buffer never
+fills with real audio, so no hop is ever scored, matching a live session that ends
+before its first 2.5s buffer fill completes.
 
 Usage:
   <full-deps-python> offline_score.py \
@@ -106,8 +111,9 @@ def _cache_key(path, model_path, scaler_path, prep_params):
 def score_wav_file(path, model, scaler, feature_extractor, seq_len, n_mels, prep_params):
     """Reproduces main.py's sliding-window scoring exactly: a 2.5s rolling buffer
     (zero-initialized, like a freshly started session), updated every 0.5s hop via
-    `np.roll`, one score per hop. The leading windows are intentionally built from a
-    mostly-zero buffer, same as a live session's first few seconds."""
+    `np.roll`. Scoring is held until the buffer has filled once with real audio --
+    mirroring main.py's handle_audio_chunk buffer-fill hold-off -- so the leading
+    hops (built from a still-partly-zero buffer) are skipped rather than scored."""
     audio = _load_wav_mono(path)
     block_size = int(TARGET_SR * HOP_SEC)
     buffer_len = int(TARGET_SR * WINDOW_SEC)
@@ -115,6 +121,7 @@ def score_wav_file(path, model, scaler, feature_extractor, seq_len, n_mels, prep
     n_hops = math.ceil(total_samples / block_size) if total_samples > 0 else 0
 
     buffer = np.zeros(buffer_len, dtype=np.float32)
+    samples_received = 0
     scores = []
     for hop in range(n_hops):
         start = hop * block_size
@@ -125,6 +132,9 @@ def score_wav_file(path, model, scaler, feature_extractor, seq_len, n_mels, prep
 
         buffer = np.roll(buffer, -block_size)
         buffer[-block_size:] = chunk
+        samples_received = min(buffer_len, samples_received + block_size)
+        if samples_received < buffer_len:
+            continue
 
         specs = feature_extractor.extract_features(
             buffer, sr=TARGET_SR, n_mels=n_mels, seq_len=seq_len, **prep_params
