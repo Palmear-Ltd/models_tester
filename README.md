@@ -64,7 +64,17 @@ models_tester/
    pip install --upgrade pip
    ```
 
-3. **Install system dependencies** (Linux only):
+3. **Install system dependencies**:
+
+   **macOS** (via [Homebrew](https://brew.sh)):
+   ```bash
+   brew install portaudio libsndfile
+   ```
+   - `portaudio` is required for microphone/audio I/O (`sounddevice`)
+   - `libsndfile` is required for WAV file handling (`soundfile`)
+   - `tkinter` (for the GUI) ships with python.org installers; if you installed Python via Homebrew and get `No module named 'tkinter'`, run `brew install python-tk`
+
+   **Linux** (Ubuntu/Debian):
    ```bash
    sudo apt-get update
    sudo apt-get install python3-tk libportaudio2 libsndfile1
