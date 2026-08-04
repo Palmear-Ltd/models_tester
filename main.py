@@ -532,8 +532,19 @@ class ModelsTesterApp:
         # falls back to the shipped models/9_1_2 default otherwise (a fitted cutoff is
         # specific to the model/scaler pair it was calibrated against).
         threshold_path = os.path.join(os.path.dirname(model_path), "decision_threshold.json")
+        fitted_for_this_model = os.path.isfile(threshold_path)
         self.decision_config = default_decision_config(threshold_path=threshold_path)
         self.log(f"Decision cutoff: {self.decision_config.cutoff:.4f} (span={self.decision_config.span})")
+        # Say which source it came from: a cutoff is specific to the model/scaler pair it
+        # was fitted against, so silently falling back to the shipped default hands this
+        # model another model's number without the tester ever knowing.
+        if fitted_for_this_model:
+            self.log(f"  source: fitted for this model ({os.path.basename(threshold_path)})")
+        else:
+            self.log(
+                f"  source: SHIPPED DEFAULT — not fitted for {os.path.basename(os.path.dirname(model_path))}; "
+                "verdicts are approximate"
+            )
 
         return True
 

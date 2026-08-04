@@ -2,16 +2,30 @@
 """CLI: batch-score labeled WAV corpora into per-window probability sequences.
 
 Offline counterpart to main.py's live sliding-window scoring loop
-(main.py:834-873 `handle_audio_chunk`, main.py:588-622 `file_loop`) — replicates it
-exactly (2.5s rolling buffer, 0.5s hop, zero-padded tail chunk, held until the buffer
-has filled once with real audio) so a decision rule validated against this script's
-output transfers unmodified to the live app. WAV I/O (soundfile/librosa) and TFLite
-inference live here, not in app/decision, mirroring calibrate.py's split between
-root-level I/O scripts and the portable app/ package.
+(`handle_audio_chunk`, `file_loop`, `mic_loop`) — replicates it exactly so a decision
+rule validated against this script's output transfers unmodified to the live app:
 
-Note: files shorter than WINDOW_SEC (2.5s) now yield zero scores -- the buffer never
-fills with real audio, so no hop is ever scored, matching a live session that ends
-before its first 2.5s buffer fill completes.
+  - 2.5s rolling buffer, 0.5s hop, advanced via np.roll
+  - held until the buffer has filled once with real audio (the leading hops are built
+    from a still-partly-zero buffer, so they are skipped rather than scored)
+  - channel 0 only, never a mean downmix -- mic_loop opens InputStream(channels=1)
+  - whole 0.5s blocks only; a short trailing block is DROPPED, not zero-padded, because
+    a padded tail puts a hard zero edge into the final windows that no live session sees
+  - capped at --max-duration-sec (default 20s, matching main.py's sliding_test_duration_var)
+
+Those last three are load-bearing, not cosmetic: EwmaPeakDecision.peak is a running max
+over the session, so scoring more windows here than a live session produces would fit a
+cutoff that the app can then cross more easily than the fit implied. Keep this file,
+main.py:file_loop and main.py:mic_loop in lockstep -- see tests/test_offline_score_parity.py
+and tests/test_input_path_parity.py.
+
+WAV I/O (soundfile/librosa) and TFLite inference live here, not in app/decision,
+mirroring calibrate.py's split between root-level I/O scripts and the portable app/
+package.
+
+Note: files shorter than WINDOW_SEC (2.5s) yield zero scores -- the buffer never fills
+with real audio, so no hop is ever scored, matching a live session that ends before its
+first 2.5s buffer fill completes.
 
 Usage:
   <full-deps-python> offline_score.py \
@@ -33,7 +47,6 @@ import csv
 import fnmatch
 import hashlib
 import json
-import math
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -49,6 +62,12 @@ from app.model.inference import ModelInference
 TARGET_SR = 44100
 HOP_SEC = 0.5
 WINDOW_SEC = 2.5
+# Matches main.py's sliding_test_duration_var default (main.py:__init__). A live test
+# auto-stops here, so scoring past it would fit the cutoff on windows the app never sees.
+DEFAULT_MAX_DURATION_SEC = 20.0
+# Bumped whenever the windowing semantics above change, so a cache written under the old
+# rules is never silently reused by a refit (rev 2: channel 0, no padded tail, capped).
+SCORING_REV = 2
 
 # Must match main.py's Tk-var defaults exactly (main.py:970-982).
 # use_filter=False: the mobile app ships with the bandpass filter disabled
@@ -85,14 +104,16 @@ def _gather_wavs(root):
 
 
 def _load_wav_mono(path):
+    """Channel 0 at TARGET_SR. Not a mean downmix: main.py:mic_loop opens the stream
+    with channels=1, which yields the first channel, and file_loop matches it."""
     data, fs = sf.read(path, always_2d=True)
-    mono = np.mean(data, axis=1).astype(np.float32)
+    mono = np.asarray(data)[:, 0].astype(np.float32)
     if fs != TARGET_SR:
         mono = librosa.resample(mono, orig_sr=fs, target_sr=TARGET_SR).astype(np.float32)
     return mono
 
 
-def _cache_key(path, model_path, scaler_path, prep_params):
+def _cache_key(path, model_path, scaler_path, prep_params, max_duration_sec=DEFAULT_MAX_DURATION_SEC):
     stat = os.stat(path)
     payload = json.dumps(
         {
@@ -102,33 +123,43 @@ def _cache_key(path, model_path, scaler_path, prep_params):
             "model_path": os.path.abspath(model_path),
             "scaler_path": os.path.abspath(scaler_path),
             "prep_params": prep_params,
+            # Windowing semantics are part of the identity of a cached score sequence.
+            "scoring_rev": SCORING_REV,
+            "hop_sec": HOP_SEC,
+            "window_sec": WINDOW_SEC,
+            "max_duration_sec": max_duration_sec,
         },
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def score_wav_file(path, model, scaler, feature_extractor, seq_len, n_mels, prep_params):
+def score_wav_file(
+    path, model, scaler, feature_extractor, seq_len, n_mels, prep_params,
+    max_duration_sec=DEFAULT_MAX_DURATION_SEC,
+):
     """Reproduces main.py's sliding-window scoring exactly: a 2.5s rolling buffer
     (zero-initialized, like a freshly started session), updated every 0.5s hop via
     `np.roll`. Scoring is held until the buffer has filled once with real audio --
     mirroring main.py's handle_audio_chunk buffer-fill hold-off -- so the leading
-    hops (built from a still-partly-zero buffer) are skipped rather than scored."""
+    hops (built from a still-partly-zero buffer) are skipped rather than scored.
+
+    Whole blocks only, capped at max_duration_sec, matching main.py:file_loop: a short
+    trailing block is dropped rather than zero-padded, and audio past the live capture
+    duration is never scored."""
     audio = _load_wav_mono(path)
     block_size = int(TARGET_SR * HOP_SEC)
     buffer_len = int(TARGET_SR * WINDOW_SEC)
-    total_samples = len(audio)
-    n_hops = math.ceil(total_samples / block_size) if total_samples > 0 else 0
+
+    available_hops = len(audio) // block_size
+    n_hops = min(int(max_duration_sec / HOP_SEC), available_hops)
 
     buffer = np.zeros(buffer_len, dtype=np.float32)
     samples_received = 0
     scores = []
     for hop in range(n_hops):
         start = hop * block_size
-        end = min(start + block_size, total_samples)
-        chunk = audio[start:end]
-        if len(chunk) < block_size:
-            chunk = np.pad(chunk, (0, block_size - len(chunk)))
+        chunk = audio[start:start + block_size]
 
         buffer = np.roll(buffer, -block_size)
         buffer[-block_size:] = chunk
@@ -156,11 +187,12 @@ _worker_feature_extractor = None
 _worker_seq_len = None
 _worker_n_mels = None
 _worker_prep_params = None
+_worker_max_duration_sec = DEFAULT_MAX_DURATION_SEC
 
 
-def _init_worker(model_path, scaler_path, prep_params):
+def _init_worker(model_path, scaler_path, prep_params, max_duration_sec=DEFAULT_MAX_DURATION_SEC):
     global _worker_model, _worker_scaler, _worker_feature_extractor
-    global _worker_seq_len, _worker_n_mels, _worker_prep_params
+    global _worker_seq_len, _worker_n_mels, _worker_prep_params, _worker_max_duration_sec
 
     _worker_model = ModelInference()
     _worker_model.load_model(model_path)
@@ -175,6 +207,7 @@ def _init_worker(model_path, scaler_path, prep_params):
 
     _worker_feature_extractor = FeatureExtractor()
     _worker_prep_params = prep_params
+    _worker_max_duration_sec = max_duration_sec
 
 
 def _score_one(path):
@@ -186,6 +219,7 @@ def _score_one(path):
         _worker_seq_len,
         _worker_n_mels,
         _worker_prep_params,
+        max_duration_sec=_worker_max_duration_sec,
     )
     return path, scores
 
@@ -233,7 +267,7 @@ def run(args):
         if label is None:
             excluded_no_label += 1
 
-        key = _cache_key(path, args.model, args.scaler, prep_params)
+        key = _cache_key(path, args.model, args.scaler, prep_params, args.max_duration_sec)
         cache_path = os.path.join(args.cache_dir, f"{key}.json")
         if not os.path.exists(cache_path):
             to_score.append((path, cache_path))
@@ -262,7 +296,7 @@ def run(args):
             with ProcessPoolExecutor(
                 max_workers=args.workers,
                 initializer=_init_worker,
-                initargs=(args.model, args.scaler, prep_params),
+                initargs=(args.model, args.scaler, prep_params, args.max_duration_sec),
             ) as executor:
                 futures = {
                     executor.submit(_score_one, path): (path, cache_path)
@@ -275,7 +309,7 @@ def run(args):
                     if i % 100 == 0 or i == len(to_score):
                         print(f"  scored {i}/{len(to_score)}")
         else:
-            _init_worker(args.model, args.scaler, prep_params)
+            _init_worker(args.model, args.scaler, prep_params, args.max_duration_sec)
             for i, (path, cache_path) in enumerate(to_score, 1):
                 _, scores = _score_one(path)
                 _write_cache(cache_path, path, scores)
@@ -315,6 +349,14 @@ def main():
     parser.add_argument("--limit", type=int, default=None, help="Only score the first N files found (smoke runs).")
     parser.add_argument("--glob", default=None, help="Only include files whose basename matches this glob pattern.")
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument(
+        "--max-duration-sec",
+        type=float,
+        default=DEFAULT_MAX_DURATION_SEC,
+        help="Score at most this many seconds per file, matching the live app's capture "
+        "cap (main.py's Sliding Test Duration setting). Change only if that setting "
+        "changed -- the two must agree or the fitted cutoff will not transfer.",
+    )
     args = parser.parse_args()
     run(args)
 

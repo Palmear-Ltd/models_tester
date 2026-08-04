@@ -42,6 +42,7 @@ from app.decision.fixed_sample import classify as quantile_classify
 from app.decision.fixed_sample import fit_quantile_thresholds
 from app.decision.likelihood import FittedLikelihood, fit_beta_params
 from app.decision.sprt import SPRTAccumulator, SPRTConfig
+from app.decision.threshold import DEFAULT_SPAN, ThresholdConfig
 
 try:
     from sklearn.metrics import roc_auc_score, roc_curve
@@ -56,6 +57,10 @@ try:
     import matplotlib.pyplot as plt
 except ImportError:
     plt = None
+
+# app.decision.baselines.ewma_peak_score and app.decision.threshold.EwmaPeakDecision both
+# default to this; the emitted config must carry the span the cutoff was fitted under.
+EWMA_SPAN = DEFAULT_SPAN
 
 ALPHA_BETA_SWEEP = (0.01, 0.05, 0.10)
 QUANTILE_ALPHA_BETA_SWEEP = (0.01, 0.05, 0.10, 0.15, 0.20, 0.30)
@@ -198,6 +203,10 @@ def build_candidates(train_records):
             "name": f"ewma_peak(cutoff={ewma_cutoff:.3f})",
             "predict": lambda scores, t=ewma_cutoff: ewma_peak(scores, t).final_state,
             "stat": lambda scores: ewma_peak_score(scores),
+            # Carried at full precision (the name rounds to 3dp) so --threshold-out can
+            # ship this value verbatim as the app's decision_threshold.json.
+            "fitted_cutoff": ewma_cutoff,
+            "span": EWMA_SPAN,
         }
     )
 
@@ -465,6 +474,35 @@ def make_plots(plots_dir, train_records, test_records, candidates, results):
     print(f"Wrote plots to {plots_dir}")
 
 
+def write_threshold_config(path, cutoff, span):
+    """Writes the app's decision_threshold.json at full float precision.
+
+    main.py:load_resources reads this from next to the model, so shipping a refit is
+    just dropping this file into models/<name>/ -- no code change."""
+    config = ThresholdConfig(cutoff=float(cutoff), span=float(span))
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(config.to_json())
+    return config
+
+
+def ewma_quantile_cross_check(candidates):
+    """The fixed-n quantile band fitted on the same ewma_peak statistic.
+
+    An independent second estimate of where the classes separate: the original fit was
+    trusted because this and the ROC-optimal cutoff agreed to within 0.0004. A wide
+    disagreement means the refit needs a human look, not a silent ship."""
+    bands = [
+        c["quantile_thresholds"]
+        for c in candidates
+        if c["name"].startswith("fixed_n_quantile_ewma_peak(") and "quantile_thresholds" in c
+    ]
+    if not bands:
+        return None
+    return sorted(bands, key=lambda b: b.t_high - b.t_low)[len(bands) // 2]
+
+
 def run(args):
     records, excluded = load_manifest(args.manifest)
     n_t = sum(1 for r in records if r.label == "T")
@@ -505,6 +543,39 @@ def run(args):
     if args.plots_dir:
         make_plots(args.plots_dir, train, test, candidates, results)
 
+    _report_fitted_cutoff(args, candidates)
+
+
+def _report_fitted_cutoff(args, candidates):
+    """Prints the fitted EWMA-peak cutoff at full precision (the summary table rounds to
+    3dp) and, with --threshold-out, ships it as the app's decision_threshold.json."""
+    ewma = next((c for c in candidates if "fitted_cutoff" in c), None)
+    if ewma is None:
+        print("\nNo ewma_peak candidate was fitted; nothing to emit.")
+        return
+
+    cutoff, span = ewma["fitted_cutoff"], ewma["span"]
+    print("\n=== Fitted EWMA-peak cutoff ===")
+    print(f"  ROC-optimal (Youden J) cutoff: {cutoff!r}  (span={span})")
+
+    band = ewma_quantile_cross_check(candidates)
+    if band is None:
+        print("  Quantile-band cross-check: unavailable (too few sessions per label).")
+    else:
+        delta = min(abs(cutoff - band.t_low), abs(cutoff - band.t_high))
+        print(f"  Quantile-band cross-check:     t_low={band.t_low:.6f} t_high={band.t_high:.6f}")
+        print(f"  Closest-edge disagreement:     {delta:.6f}", end="")
+        # The 2026-06 fit agreed to 0.0004; an order of magnitude worse means the two
+        # methods no longer see the same separation and the number needs a human look.
+        print("  <- LARGE, review before shipping" if delta > 0.01 else "  (consistent)")
+
+    if args.threshold_out:
+        write_threshold_config(args.threshold_out, cutoff, span)
+        print(f"\nWrote {args.threshold_out}")
+        print("  Copy it to models/<model>/decision_threshold.json to activate it.")
+    else:
+        print("\n(Pass --threshold-out models/<model>/decision_threshold.json to ship this.)")
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -515,6 +586,12 @@ def main():
     parser.add_argument("--plots-dir", default=None, help="If set, write comparison PNGs here.")
     parser.add_argument("--test-frac", type=float, default=0.3)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--threshold-out",
+        default=None,
+        help="Write the fitted EWMA-peak cutoff here as a decision_threshold.json the "
+        "app can load (e.g. models/9_1_2/decision_threshold.json).",
+    )
     args = parser.parse_args()
     run(args)
 
