@@ -96,7 +96,9 @@ class SettingsDialog:
         ttk.Radiobutton(mode_frame, text="Sliding Window", variable=app.inference_mode_var, value="sliding").pack(side="left", padx=5)
         ttk.Radiobutton(mode_frame, text=f"Single Shot ({app.single_shot_duration_sec}s)", variable=app.inference_mode_var, value="single").pack(side="left", padx=5)
 
-        ttk.Label(tab, text="Mic Test Duration (sec):").grid(row=5, column=0, sticky="w", pady=5)
+        # Applies to both input paths (main.py:capture_duration_sec) -- a WAV replay is
+        # truncated to this same duration so it stays comparable to a live test.
+        ttk.Label(tab, text="Sliding Test Duration (sec):").grid(row=5, column=0, sticky="w", pady=5)
         ttk.Spinbox(
             tab, from_=1.0, to=300.0, increment=1.0, textvariable=app.sliding_test_duration_var, width=12
         ).grid(row=5, column=1, sticky="w", padx=5)

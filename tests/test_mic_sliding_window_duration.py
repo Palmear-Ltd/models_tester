@@ -1,26 +1,26 @@
 """Sliding-window mic tests now auto-stop after a configurable duration (default 20s),
 the same way single-shot mode already did, so a tester isn't stuck manually clicking
-STOP TEST every run. See main.py:mic_capture_duration_sec / main.py:mic_loop."""
+STOP TEST every run. See main.py:capture_duration_sec / main.py:mic_loop."""
 import queue
 
 import numpy as np
 import pytest
 
 import main
-from main import ModelsTesterApp, mic_capture_duration_sec
+from main import ModelsTesterApp, capture_duration_sec
 
 
-def test_mic_capture_duration_sec_uses_single_shot_value_in_single_mode():
-    assert mic_capture_duration_sec("single", 20, 45.0) == 20
+def test_capture_duration_sec_uses_single_shot_value_in_single_mode():
+    assert capture_duration_sec("single", 20, 45.0) == 20
 
 
-def test_mic_capture_duration_sec_uses_sliding_value_in_sliding_mode():
-    assert mic_capture_duration_sec("sliding", 20, 45.0) == 45.0
+def test_capture_duration_sec_uses_sliding_value_in_sliding_mode():
+    assert capture_duration_sec("sliding", 20, 45.0) == 45.0
 
 
-def test_mic_capture_duration_sec_defaults_to_20_for_sliding():
+def test_capture_duration_sec_defaults_to_20_for_sliding():
     # main.py's ModelsTesterApp seeds sliding_test_duration_var at 20.0 (main.py:__init__).
-    assert mic_capture_duration_sec("sliding", 20, 20.0) == 20.0
+    assert capture_duration_sec("sliding", 20, 20.0) == 20.0
 
 
 class _FakeVar:

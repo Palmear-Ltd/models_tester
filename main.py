@@ -36,8 +36,13 @@ VALIDATION_WINDOWS = 40  # ~20 s of validation at 0.5 s per window
 USER_SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_settings.json")
 
 
-def mic_capture_duration_sec(inference_mode, single_shot_duration_sec, sliding_test_duration_sec):
-    """Max mic capture duration (seconds) before a test auto-stops, by inference mode."""
+def capture_duration_sec(inference_mode, single_shot_duration_sec, sliding_test_duration_sec):
+    """Max capture duration (seconds) before a test auto-stops, by inference mode.
+
+    Shared by mic_loop and file_loop so a WAV replay covers exactly as much audio as a
+    live test would. This is not cosmetic: EwmaPeakDecision.peak is a running max over
+    the session, so replaying a longer file gives strictly more chances to cross the
+    cutoff than the fixed-length sessions the cutoff was fitted on."""
     if inference_mode == "single":
         return single_shot_duration_sec
     return sliding_test_duration_sec
@@ -633,71 +638,90 @@ class ModelsTesterApp:
 
     def mic_loop(self, device_idx):
         self.log(f"Starting Mic Stream on Device {device_idx}...")
-        
-        sample_rate = 44100
-        
+
+        sample_rate = SAMPLE_RATE
+
         block_size = int(sample_rate * 0.5) # 0.5 sec blocks
 
-        duration_sec = mic_capture_duration_sec(
+        duration_sec = capture_duration_sec(
             self.inference_mode_var.get(), self.single_shot_duration_sec, self.sliding_test_duration_var.get()
         )
         max_chunks = int(duration_sec / 0.5)
         mode_label = "Single-shot" if self.inference_mode_var.get() == "single" else "Sliding-window"
         self.log(f"{mode_label} mode: capturing {duration_sec}s")
         chunk_count = [0]
-        
+
         def callback(indata, frames, time, status):
+            # The cap is enforced here, not just in the polling loop below: that loop
+            # only wakes every 0.1s, so callbacks could otherwise overshoot and queue
+            # windows a same-duration file replay would never produce.
+            if chunk_count[0] >= max_chunks:
+                return
             self.audio_queue.put(indata.copy())
             chunk_count[0] += 1
-            
+
         try:
-            with sd.InputStream(device=device_idx, channels=1, samplerate=sample_rate, 
+            with sd.InputStream(device=device_idx, channels=1, samplerate=sample_rate,
                                 blocksize=block_size, callback=callback):
                 while self.is_running:
-                    if max_chunks is not None and chunk_count[0] >= max_chunks:
+                    if chunk_count[0] >= max_chunks:
                         self.is_running = False
                         break
                     time.sleep(0.1)
         except Exception as e:
             self.audio_queue.put(("ERROR", str(e)))
-            
+
     def file_loop(self, file_path):
+        """Replays a WAV as if it were the mic.
+
+        Deliberately mirrors mic_loop chunk for chunk -- same duration cap, same block
+        size, same (frames, 1) float32 blocks, same first-channel-only, no partial
+        blocks -- because everything downstream of audio_queue is shared. Any asymmetry
+        here makes a file replay non-comparable to a live test of the same signal."""
         self.log(f"Processing File: {file_path}")
         try:
             data, fs = sf.read(file_path, always_2d=True)
-            # Mix to mono
+            # Take channel 0 rather than downmixing: mic_loop opens the stream with
+            # channels=1, which gives the first channel, not a mix.
             if data.shape[1] > 1:
-                data = np.mean(data, axis=1)
-            else:
-                data = data[:, 0]
-                
+                self.log(f"File has {data.shape[1]} channels; using channel 1 (mic parity).")
+            data = data[:, 0]
+
             # Resample if needed
-            if fs != 44100:
-                self.log(f"Resampling from {fs} to 44100...")
-                data = librosa.resample(data, orig_sr=fs, target_sr=44100)
-                fs = 44100
-                
+            if fs != SAMPLE_RATE:
+                self.log(f"Resampling from {fs} to {SAMPLE_RATE}...")
+                data = librosa.resample(data, orig_sr=fs, target_sr=SAMPLE_RATE)
+                fs = SAMPLE_RATE
+
             block_size_samples = int(fs * 0.5)
-            total_samples = len(data)
-            if self.inference_mode_var.get() == "single":
-                total_samples = min(total_samples, int(fs * self.single_shot_duration_sec))
-            
-            idx = 0
-            while self.is_running and idx < total_samples:
-                end = min(idx + block_size_samples, total_samples)
-                chunk = data[idx:end]
-                
-                # If last chunk is small, pad?
-                if len(chunk) < block_size_samples:
-                    chunk = np.pad(chunk, (0, block_size_samples - len(chunk)))
-                    
-                self.audio_queue.put(chunk.reshape(-1, 1))
-                idx += block_size_samples
+
+            duration_sec = capture_duration_sec(
+                self.inference_mode_var.get(), self.single_shot_duration_sec, self.sliding_test_duration_var.get()
+            )
+            mode_label = "Single-shot" if self.inference_mode_var.get() == "single" else "Sliding-window"
+            self.log(f"{mode_label} mode: capturing {duration_sec}s")
+
+            max_chunks = int(duration_sec / 0.5)
+            # Whole blocks only. A short final block used to be zero-padded, and that
+            # zero edge rolls through the session buffer and trips the click/dropout
+            # checks (see rootcause.py's DEFAULT_SESSION_CUTOFF comment). The mic never
+            # emits a partial block, so neither do we -- the remainder is dropped.
+            available_chunks = len(data) // block_size_samples
+            total_chunks = min(max_chunks, available_chunks)
+
+            chunk_count = 0
+            while self.is_running and chunk_count < total_chunks:
+                # Sleep first: a mic block only exists after 0.5s of capture, so this
+                # keeps the two paths' session timeline (and plots) aligned.
                 time.sleep(0.5) # Simulate real-time
-                
+                start = chunk_count * block_size_samples
+                chunk = data[start:start + block_size_samples]
+                self.audio_queue.put(chunk.reshape(-1, 1).astype(np.float32))
+                chunk_count += 1
+
             self.log("File finished.")
             self.is_running = False
-            
+
         except Exception as e:
             self.audio_queue.put(("ERROR", str(e)))
             
