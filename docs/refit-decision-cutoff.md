@@ -3,6 +3,9 @@
 Run this on the machine that holds the labeled corpus. Everything is already wired — you
 should not need to edit any code.
 
+For how the values are produced and which code to change when shipping a new one, see
+[`decision-cutoff-maintenance.md`](decision-cutoff-maintenance.md).
+
 ## Why this needs doing
 
 The decision cutoff is the single number a session verdict turns on: `EwmaPeakDecision`
