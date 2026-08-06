@@ -30,11 +30,18 @@ def _records(n=40):
 
 def test_ewma_candidate_exposes_its_fitted_cutoff_at_full_precision():
     candidates = ev.build_candidates(_records())
-    ewma = next(c for c in candidates if c["name"].startswith("ewma_peak("))
+    ewma = next(c for c in candidates if c["name"].startswith("ewma_peak(") and c["span"] == DEFAULT_SPAN)
 
     assert "fitted_cutoff" in ewma
     assert isinstance(ewma["fitted_cutoff"], float)
     assert ewma["span"] == DEFAULT_SPAN
+
+
+def test_ewma_span_sweep_produces_one_candidate_per_span():
+    candidates = ev.build_candidates(_records())
+    ewma_spans = {c["span"] for c in candidates if c["name"].startswith("ewma_peak(")}
+
+    assert ewma_spans == set(ev.EWMA_SPAN_SWEEP)
 
 
 def test_write_threshold_config_round_trips_through_the_apps_loader(tmp_path):
@@ -59,7 +66,27 @@ def test_quantile_cross_check_is_reported_for_the_ewma_statistic():
     # The original fit was validated by two independent methods agreeing to within
     # 0.0004; that check is only possible if the quantile band is surfaced too.
     candidates = ev.build_candidates(_records())
-    band = ev.ewma_quantile_cross_check(candidates)
+    band = ev.ewma_quantile_cross_check(candidates, DEFAULT_SPAN)
 
     assert band is not None
     assert band.t_low <= band.t_high
+
+
+def test_quantile_cross_check_is_span_specific():
+    # A band fitted at one span must not be reported against a cutoff fitted at another --
+    # that would silently compare two different statistics.
+    candidates = ev.build_candidates(_records())
+    other_span = next(s for s in ev.EWMA_SPAN_SWEEP if s != DEFAULT_SPAN)
+
+    band_default = ev.ewma_quantile_cross_check(candidates, DEFAULT_SPAN)
+    band_other = ev.ewma_quantile_cross_check(candidates, other_span)
+
+    assert band_default is not None and band_other is not None
+    # Not asserting they differ (they could coincide by chance on tiny synthetic data) --
+    # just that each call is actually filtering by its own span, not silently mixing.
+    default_bands = {
+        c["quantile_thresholds"]
+        for c in candidates
+        if c["name"].startswith("fixed_n_quantile_ewma_peak_span") and c.get("span") == DEFAULT_SPAN
+    }
+    assert band_default in default_bands

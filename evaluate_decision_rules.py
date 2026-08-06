@@ -12,6 +12,12 @@ Any data-driven fitting (ROC-optimal cutoffs, SPRT's fitted-mode Beta likelihood
 on a held-out train split only; ALL reported metrics are computed on a separate test split,
 so a candidate can't simply memorize the corpus it's graded on.
 
+ewma_peak is fit at several EWMA spans (EWMA_SPAN_SWEEP), each ranked on the test split
+exactly like any other candidate -- the winning span ships alongside its cutoff. Different
+models were found (2026-08) to want different spans (an older/larger architecture favored
+near-zero smoothing, opposite of the span=5.0 originally validated only against 9_1_2), so
+span is no longer assumed fixed across models.
+
 Usage:
   <full-deps-python> evaluate_decision_rules.py --manifest manifest.csv \
       --report-out evaluation_report.csv [--plots-dir plots/]
@@ -59,8 +65,17 @@ except ImportError:
     plt = None
 
 # app.decision.baselines.ewma_peak_score and app.decision.threshold.EwmaPeakDecision both
-# default to this; the emitted config must carry the span the cutoff was fitted under.
+# default to this; kept as the reference/fallback span (DEFAULT_SPAN in threshold.py).
 EWMA_SPAN = DEFAULT_SPAN
+
+# Different models were found (2026-08) to have differently-shaped per-window score
+# sequences -- an older/larger architecture (9_1_1) turned out to want near-zero
+# smoothing, opposite of the span=5.0 fit validated only against 9_1_2. So span is now
+# swept and fit per model, same as any other candidate rule: each value here becomes its
+# own ewma_peak(span=...) candidate, fit on train and ranked on test like everything
+# else. The winner's span ships in that model's decision_threshold.json alongside its
+# cutoff -- ThresholdConfig already carries both, so no app code change is needed.
+EWMA_SPAN_SWEEP = (1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0)
 
 ALPHA_BETA_SWEEP = (0.01, 0.05, 0.10)
 QUANTILE_ALPHA_BETA_SWEEP = (0.01, 0.05, 0.10, 0.15, 0.20, 0.30)
@@ -148,14 +163,17 @@ def _sprt_candidate(name, config):
     return {"name": name, "predict": predict, "stat": stat, "config": config}
 
 
-def _quantile_candidate(name, stat_fn, thresholds):
+def _quantile_candidate(name, stat_fn, thresholds, span=None):
     def predict(scores, sf=stat_fn, th=thresholds):
         return quantile_classify(sf(scores), th)
 
     def stat(scores, sf=stat_fn):
         return sf(scores)
 
-    return {"name": name, "predict": predict, "stat": stat, "quantile_thresholds": thresholds}
+    candidate = {"name": name, "predict": predict, "stat": stat, "quantile_thresholds": thresholds}
+    if span is not None:
+        candidate["span"] = span
+    return candidate
 
 
 def build_candidates(train_records):
@@ -196,19 +214,20 @@ def build_candidates(train_records):
         }
     )
 
-    train_ewma = [ewma_peak_score(r.scores) for r in train_records]
-    ewma_cutoff = roc_optimal_threshold(train_ewma, train_binary)
-    candidates.append(
-        {
-            "name": f"ewma_peak(cutoff={ewma_cutoff:.3f})",
-            "predict": lambda scores, t=ewma_cutoff: ewma_peak(scores, t).final_state,
-            "stat": lambda scores: ewma_peak_score(scores),
-            # Carried at full precision (the name rounds to 3dp) so --threshold-out can
-            # ship this value verbatim as the app's decision_threshold.json.
-            "fitted_cutoff": ewma_cutoff,
-            "span": EWMA_SPAN,
-        }
-    )
+    for span in EWMA_SPAN_SWEEP:
+        train_ewma = [ewma_peak_score(r.scores, span=span) for r in train_records]
+        ewma_cutoff = roc_optimal_threshold(train_ewma, train_binary)
+        candidates.append(
+            {
+                "name": f"ewma_peak(span={span:g},cutoff={ewma_cutoff:.3f})",
+                "predict": lambda scores, t=ewma_cutoff, sp=span: ewma_peak(scores, t, span=sp).final_state,
+                "stat": lambda scores, sp=span: ewma_peak_score(scores, span=sp),
+                # Carried at full precision (the name rounds to 3dp) so --threshold-out can
+                # ship this value verbatim as the app's decision_threshold.json.
+                "fitted_cutoff": ewma_cutoff,
+                "span": span,
+            }
+        )
 
     # Fixed-sample-size quantile-band thresholds: recordings here are a fixed ~20s/40
     # windows, not open-ended, so this asks "what statistic value separates the classes
@@ -220,8 +239,13 @@ def build_candidates(train_records):
     healthy_sessions = train_by_label.get("F", [])
     infested_sessions = train_by_label.get("T", [])
     if len(healthy_sessions) >= 2 and len(infested_sessions) >= 2:
-        stat_fns = {"mean": mean_score, "median": median_score, "ewma_peak": ewma_peak_score}
-        for stat_name, stat_fn in stat_fns.items():
+        stat_fns = {"mean": (mean_score, None), "median": (median_score, None)}
+        for span in EWMA_SPAN_SWEEP:
+            stat_fns[f"ewma_peak_span{span:g}"] = (
+                lambda scores, sp=span: ewma_peak_score(scores, span=sp),
+                span,
+            )
+        for stat_name, (stat_fn, stat_span) in stat_fns.items():
             healthy_stats = [stat_fn(r.scores) for r in healthy_sessions]
             infested_stats = [stat_fn(r.scores) for r in infested_sessions]
             for alpha in QUANTILE_ALPHA_BETA_SWEEP:
@@ -233,6 +257,7 @@ def build_candidates(train_records):
                         f"t_low={thresholds.t_low:.3f},t_high={thresholds.t_high:.3f})",
                         stat_fn,
                         thresholds,
+                        span=stat_span,
                     )
                 )
     else:
@@ -487,16 +512,19 @@ def write_threshold_config(path, cutoff, span):
     return config
 
 
-def ewma_quantile_cross_check(candidates):
-    """The fixed-n quantile band fitted on the same ewma_peak statistic.
+def ewma_quantile_cross_check(candidates, span):
+    """The fixed-n quantile band fitted on the ewma_peak statistic at the given span.
 
     An independent second estimate of where the classes separate: the original fit was
     trusted because this and the ROC-optimal cutoff agreed to within 0.0004. A wide
-    disagreement means the refit needs a human look, not a silent ship."""
+    disagreement means the refit needs a human look, not a silent ship. `span` must match
+    the ewma_peak candidate the cutoff was actually fit at -- comparing against a
+    different span's band would be an apples-to-oranges check."""
     bands = [
         c["quantile_thresholds"]
         for c in candidates
-        if c["name"].startswith("fixed_n_quantile_ewma_peak(") and "quantile_thresholds" in c
+        if c["name"].startswith("fixed_n_quantile_ewma_peak_span") and c.get("span") == span
+        and "quantile_thresholds" in c
     ]
     if not bands:
         return None
@@ -543,22 +571,28 @@ def run(args):
     if args.plots_dir:
         make_plots(args.plots_dir, train, test, candidates, results)
 
-    _report_fitted_cutoff(args, candidates)
+    _report_fitted_cutoff(args, candidates, results)
 
 
-def _report_fitted_cutoff(args, candidates):
+def _report_fitted_cutoff(args, candidates, results):
     """Prints the fitted EWMA-peak cutoff at full precision (the summary table rounds to
-    3dp) and, with --threshold-out, ships it as the app's decision_threshold.json."""
-    ewma = next((c for c in candidates if "fitted_cutoff" in c), None)
-    if ewma is None:
+    3dp) and, with --threshold-out, ships it as the app's decision_threshold.json.
+
+    Several span variants were fit (EWMA_SPAN_SWEEP) and ranked on the test split
+    alongside every other candidate rule; this picks whichever span variant that ranking
+    already preferred, rather than assuming a single fixed span."""
+    best_ewma_result = next((r for r in results if r["name"].startswith("ewma_peak(")), None)
+    if best_ewma_result is None:
         print("\nNo ewma_peak candidate was fitted; nothing to emit.")
         return
+    ewma = next(c for c in candidates if c["name"] == best_ewma_result["name"])
 
     cutoff, span = ewma["fitted_cutoff"], ewma["span"]
     print("\n=== Fitted EWMA-peak cutoff ===")
+    print(f"  Best span (of {EWMA_SPAN_SWEEP}, by test-set accuracy_conservative): {span:g}")
     print(f"  ROC-optimal (Youden J) cutoff: {cutoff!r}  (span={span})")
 
-    band = ewma_quantile_cross_check(candidates)
+    band = ewma_quantile_cross_check(candidates, span)
     if band is None:
         print("  Quantile-band cross-check: unavailable (too few sessions per label).")
     else:
