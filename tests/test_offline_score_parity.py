@@ -43,12 +43,12 @@ class _FakeModel:
         return np.array([[0.5]], dtype=np.float32)
 
 
-def _score(audio, monkeypatch, max_duration_sec=20.0):
+def _score(audio, monkeypatch, max_duration_sec=20.0, seq_len=98, model_path="model.tflite"):
     monkeypatch.setattr(offline_score, "_load_wav_mono", lambda _p: np.asarray(audio, dtype=np.float32))
     extractor = _FakeExtractor()
     scores = offline_score.score_wav_file(
-        "any.wav", _FakeModel(), _FakeScaler(), extractor, 98, 32, {},
-        max_duration_sec=max_duration_sec,
+        "any.wav", _FakeModel(), _FakeScaler(), extractor, seq_len, 32, {},
+        max_duration_sec=max_duration_sec, model_path=model_path,
     )
     return scores, extractor
 
@@ -101,6 +101,50 @@ def test_load_wav_mono_takes_channel_zero_like_the_mic(monkeypatch):
     mono = offline_score._load_wav_mono("any.wav")
 
     assert np.allclose(mono, 0.1)
+
+
+def test_one_shot_model_is_detected_by_seq_len_or_path():
+    assert offline_score._is_one_shot_model("models/whatever/model.tflite", 784)
+    assert offline_score._is_one_shot_model("models/one_shot/model.tflite", 98)
+    assert not offline_score._is_one_shot_model("models/9_1_2/model.tflite", 98)
+
+
+def test_one_shot_model_yields_a_single_score_not_a_sliding_window(monkeypatch):
+    # A one-shot model would otherwise get the sliding-window loop's 2.5s buffer padded
+    # out to its full (784-frame) seq_len 36 times over -- not what a live single-shot
+    # session ever feeds it (main.py:run_single_shot_inference infers once).
+    scores, extractor = _score(
+        np.ones(TARGET_SR * 20), monkeypatch, seq_len=784, model_path="models/one_shot/model.tflite"
+    )
+    assert len(scores) == 1
+    assert len(extractor.buffers) == 1
+
+
+def test_one_shot_model_pads_a_short_clip_like_run_single_shot_inference(monkeypatch):
+    _, extractor = _score(
+        np.ones(TARGET_SR * 10), monkeypatch, max_duration_sec=20.0, seq_len=784,
+        model_path="models/one_shot/model.tflite",
+    )
+    buffer = extractor.buffers[0]
+    assert len(buffer) == TARGET_SR * 20
+    assert np.all(buffer[: TARGET_SR * 10] == 1.0)
+    assert np.all(buffer[TARGET_SR * 10 :] == 0.0)  # zero-padded tail, not dropped
+
+
+def test_one_shot_model_truncates_a_long_clip_to_the_target_duration(monkeypatch):
+    _, extractor = _score(
+        np.ones(TARGET_SR * 60), monkeypatch, max_duration_sec=20.0, seq_len=784,
+        model_path="models/one_shot/model.tflite",
+    )
+    assert len(extractor.buffers[0]) == TARGET_SR * 20
+
+
+def test_one_shot_model_on_empty_audio_scores_nothing(monkeypatch):
+    scores, extractor = _score(
+        np.zeros(0), monkeypatch, seq_len=784, model_path="models/one_shot/model.tflite"
+    )
+    assert scores == []
+    assert extractor.buffers == []
 
 
 def test_cache_key_changes_when_scoring_semantics_change(tmp_path):

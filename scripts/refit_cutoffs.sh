@@ -37,10 +37,13 @@ for root in "$@"; do
     CORPUS_ARGS+=(--corpus "$root")
 done
 
-# model-dir-name:scaler-filename (9_1_1's scaler is spelled "scalar.json" in that drop)
+# model-dir-name:scaler-filename (9_1_1 and 9_0_5's scaler is spelled "scalar.json" in
+# that drop)
 MODELS=(
     "9_1_1:scalar.json"
     "9_1_2:scaler.json"
+    "9_0_5:scalar.json"
+    "one_shot:scaler.json"
 )
 
 mkdir -p "$OUT_DIR"

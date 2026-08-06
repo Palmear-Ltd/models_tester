@@ -34,8 +34,14 @@ Usage:
       --model models/9_1_2/model.tflite --scaler models/9_1_2/scaler.json \
       --cache-dir .score_cache --manifest-out manifest.csv
 
-Assumes a sliding-window (non-one-shot) model, matching main.py's default behavior for
-models/9_1_2. Ground truth is resolved from a `T`/`F` path component (see
+One-shot models (seq_len >= 784, or "one_shot" in the model path -- same heuristic as
+main.py:load_model) are detected automatically and scored via a separate path that
+mirrors main.py:run_single_shot_inference instead: no rolling buffer, a single inference
+on the (zero-padded-or-truncated) first --max-duration-sec of audio, yielding exactly one
+score. Applying the sliding-window loop to a one-shot model would feed it a 2.5s buffer
+padded out to its full seq_len, which is not what a live single-shot session ever does.
+
+Ground truth is resolved from a `T`/`F` path component (see
 app.decision.manifest.resolve_label) — files with no such component, or an ambiguous
 `X_` filename prefix, are still scored but flagged for exclusion in the manifest rather
 than silently trusted.
@@ -134,20 +140,62 @@ def _cache_key(path, model_path, scaler_path, prep_params, max_duration_sec=DEFA
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _is_one_shot_model(model_path, seq_len):
+    """Mirrors main.py:load_model's heuristic (main.py:510) for detecting a one-shot
+    (single full-clip inference) model vs. a sliding-window one."""
+    return seq_len >= 784 or "one_shot" in model_path.lower()
+
+
+def _infer_score(buffer, model, scaler, feature_extractor, seq_len, n_mels, prep_params):
+    specs = feature_extractor.extract_features(
+        buffer, sr=TARGET_SR, n_mels=n_mels, seq_len=seq_len, **prep_params
+    )
+    specs_scaled = scaler.apply(specs)
+    input_data = specs_scaled.reshape(1, seq_len, n_mels, 1).astype(np.float32)
+    output = model.predict(input_data)
+    return float(output[0][0]) if output.shape[-1] == 1 else float(output[0][1])
+
+
+def _score_one_shot(audio, model, scaler, feature_extractor, seq_len, n_mels, prep_params, max_duration_sec):
+    """Reproduces main.py:run_single_shot_inference: the full captured clip, zero-padded
+    if shorter than max_duration_sec or truncated to it if longer, scored in a single
+    inference -- no rolling buffer, no per-hop scores. An empty file yields no score,
+    matching a session that captures no audio to infer on.
+
+    max_duration_sec doubles here as main.py's separate single_shot_duration_sec (both
+    default to 20s in main.py's __init__); pass --max-duration-sec accordingly if a
+    one-shot model's Settings -> Single-shot Duration has been changed independently."""
+    if len(audio) == 0:
+        return []
+    target_samples = int(TARGET_SR * max_duration_sec)
+    if len(audio) < target_samples:
+        clip = np.pad(audio, (0, target_samples - len(audio)))
+    else:
+        clip = audio[:target_samples]
+    return [_infer_score(clip, model, scaler, feature_extractor, seq_len, n_mels, prep_params)]
+
+
 def score_wav_file(
     path, model, scaler, feature_extractor, seq_len, n_mels, prep_params,
-    max_duration_sec=DEFAULT_MAX_DURATION_SEC,
+    max_duration_sec=DEFAULT_MAX_DURATION_SEC, model_path="",
 ):
-    """Reproduces main.py's sliding-window scoring exactly: a 2.5s rolling buffer
-    (zero-initialized, like a freshly started session), updated every 0.5s hop via
-    `np.roll`. Scoring is held until the buffer has filled once with real audio --
-    mirroring main.py's handle_audio_chunk buffer-fill hold-off -- so the leading
-    hops (built from a still-partly-zero buffer) are skipped rather than scored.
+    """Reproduces main.py's scoring exactly. Two branches, dispatched by model type
+    (see _is_one_shot_model):
 
-    Whole blocks only, capped at max_duration_sec, matching main.py:file_loop: a short
-    trailing block is dropped rather than zero-padded, and audio past the live capture
-    duration is never scored."""
+    Sliding-window (the default): a 2.5s rolling buffer (zero-initialized, like a
+    freshly started session), updated every 0.5s hop via `np.roll`. Scoring is held
+    until the buffer has filled once with real audio -- mirroring main.py's
+    handle_audio_chunk buffer-fill hold-off -- so the leading hops (built from a
+    still-partly-zero buffer) are skipped rather than scored. Whole blocks only, capped
+    at max_duration_sec, matching main.py:file_loop: a short trailing block is dropped
+    rather than zero-padded, and audio past the live capture duration is never scored.
+
+    One-shot: see _score_one_shot."""
     audio = _load_wav_mono(path)
+
+    if _is_one_shot_model(model_path, seq_len):
+        return _score_one_shot(audio, model, scaler, feature_extractor, seq_len, n_mels, prep_params, max_duration_sec)
+
     block_size = int(TARGET_SR * HOP_SEC)
     buffer_len = int(TARGET_SR * WINDOW_SEC)
 
@@ -167,14 +215,7 @@ def score_wav_file(
         if samples_received < buffer_len:
             continue
 
-        specs = feature_extractor.extract_features(
-            buffer, sr=TARGET_SR, n_mels=n_mels, seq_len=seq_len, **prep_params
-        )
-        specs_scaled = scaler.apply(specs)
-        input_data = specs_scaled.reshape(1, seq_len, n_mels, 1).astype(np.float32)
-        output = model.predict(input_data)
-        score = float(output[0][0]) if output.shape[-1] == 1 else float(output[0][1])
-        scores.append(score)
+        scores.append(_infer_score(buffer, model, scaler, feature_extractor, seq_len, n_mels, prep_params))
 
     return scores
 
@@ -188,17 +229,19 @@ _worker_seq_len = None
 _worker_n_mels = None
 _worker_prep_params = None
 _worker_max_duration_sec = DEFAULT_MAX_DURATION_SEC
+_worker_model_path = ""
 
 
 def _init_worker(model_path, scaler_path, prep_params, max_duration_sec=DEFAULT_MAX_DURATION_SEC):
     global _worker_model, _worker_scaler, _worker_feature_extractor
-    global _worker_seq_len, _worker_n_mels, _worker_prep_params, _worker_max_duration_sec
+    global _worker_seq_len, _worker_n_mels, _worker_prep_params, _worker_max_duration_sec, _worker_model_path
 
     _worker_model = ModelInference()
     _worker_model.load_model(model_path)
     input_shape = _worker_model.get_input_shape()
     _worker_seq_len = int(input_shape[1])
     _worker_n_mels = int(input_shape[2])
+    _worker_model_path = model_path
 
     _worker_scaler = Scaler()
     mean, _var = _worker_scaler.load(scaler_path)
@@ -220,6 +263,7 @@ def _score_one(path):
         _worker_n_mels,
         _worker_prep_params,
         max_duration_sec=_worker_max_duration_sec,
+        model_path=_worker_model_path,
     )
     return path, scores
 
