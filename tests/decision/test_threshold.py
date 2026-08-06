@@ -64,3 +64,12 @@ def test_ewma_peak_decision_matches_batch_ewma_peak_score():
     for s in scores:
         decision.update(s)
     assert decision.peak == ewma_peak_score(scores, span=5.0)
+
+
+def test_ewma_peak_decision_smoothed_tracks_current_value_not_peak():
+    decision = EwmaPeakDecision(ThresholdConfig(cutoff=0.5, span=5.0))
+    assert decision.smoothed == 0.0  # before any update
+    for s in [0.9, 0.9, 0.9, 0.1, 0.1, 0.1]:
+        decision.update(s)
+    # Unlike peak (a running max), smoothed can fall back down after a drop.
+    assert decision.smoothed < decision.peak

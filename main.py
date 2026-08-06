@@ -109,6 +109,7 @@ class ModelsTesterApp:
         self.score_history = []
         self.trigger_history = [] # (time, is_trigger)
         self.energy_history = []  # (time, rms)
+        self.ewma_history = []    # (time, smoothed, peak) -- EwmaPeakDecision state per window
         self.health_state_history = []  # (time, level: 0=OK, 1=WARNING, 2=FAULT)
         self.current_energy = 0.0
         self.start_time = 0
@@ -361,14 +362,15 @@ class ModelsTesterApp:
         status_scrollbar.configure(command=self.status_log.yview)
         
         # --- Plots Area (Right): one responsive grid figure (no scroll) ---
-        self.plot_fig = Figure(figsize=(7, 6), dpi=100, constrained_layout=True)
-        gs = self.plot_fig.add_gridspec(4, 2, height_ratios=[2, 2, 2, 1.3])
+        self.plot_fig = Figure(figsize=(7, 7), dpi=100, constrained_layout=True)
+        gs = self.plot_fig.add_gridspec(5, 2, height_ratios=[2, 2, 2, 1.3, 1.3])
         self.ax_wave = self.plot_fig.add_subplot(gs[0, :])      # waveform: full-width top
         self.ax_spec = self.plot_fig.add_subplot(gs[1, 0])      # spectrogram
         self.ax_energy = self.plot_fig.add_subplot(gs[1, 1])    # energy timeline
         self.ax_time = self.plot_fig.add_subplot(gs[2, 0])      # trigger timeline
         self.ax_hist = self.plot_fig.add_subplot(gs[2, 1])      # score distribution
-        self.ax_health = self.plot_fig.add_subplot(gs[3, :])    # health timeline: full-width strip
+        self.ax_ewma = self.plot_fig.add_subplot(gs[3, :])      # EWMA decision timeline: full-width strip
+        self.ax_health = self.plot_fig.add_subplot(gs[4, :])    # health timeline: full-width strip
         self.plot_canvas = FigureCanvasTkAgg(self.plot_fig, master=right_frame)
         self.plot_canvas.get_tk_widget().pack(fill="both", expand=True)
 
@@ -567,6 +569,7 @@ class ModelsTesterApp:
         self.score_history = []
         self.trigger_history = []
         self.energy_history = []
+        self.ewma_history = []
         self.health_state_history = []
         self.runtime_monitor = RuntimeMonitor()
         self._last_anomalous = False
@@ -1179,6 +1182,7 @@ class ModelsTesterApp:
                 "score_history": [float(s) for s in self.score_history],
                 "trigger_history": [(float(t), int(v)) for t, v in self.trigger_history],
                 "energy_history": [(float(t), float(v)) for t, v in self.energy_history],
+                "ewma_history": [(float(t), float(s), float(p)) for t, s, p in self.ewma_history],
             }
 
             results_path = f"{base}.json"
@@ -1253,6 +1257,9 @@ class ModelsTesterApp:
             # Update session decision (EWMA-peak vs the auto-calibrated cutoff)
             if self.decision_accumulator is not None:
                 self.decision_accumulator.update(float(score))
+                self.ewma_history.append(
+                    (curr_time, self.decision_accumulator.smoothed, self.decision_accumulator.peak)
+                )
                 self.pos_label.configure(text=f"{self.decision_accumulator.peak:.2f}")
                 self.neg_label.configure(text=self.decision_accumulator.state)
 
@@ -1316,6 +1323,22 @@ class ModelsTesterApp:
                 self.ax_time.set_xlabel("Time (s)", fontsize=8)
                 self.ax_time.tick_params(labelsize=7)
                 self.ax_time.grid(True)
+
+            # Update EWMA Decision Timeline (smoothed score, running peak, vs cutoff)
+            if self.ewma_history:
+                times, smoothed, peaks = zip(*self.ewma_history)
+                self.ax_ewma.clear()
+                self.ax_ewma.plot(times, smoothed, color="tab:blue", linewidth=1.5, label="EWMA")
+                self.ax_ewma.plot(times, peaks, color="tab:purple", linestyle="--", linewidth=1, label="Peak")
+                self.ax_ewma.axhline(
+                    self.decision_config.cutoff, color="red", linestyle=":", linewidth=1, label="Cutoff"
+                )
+                self.ax_ewma.set_title("EWMA Decision Timeline", fontsize=9)
+                self.ax_ewma.set_ylim(0, 1)
+                self.ax_ewma.set_xlabel("Time (s)", fontsize=8)
+                self.ax_ewma.tick_params(labelsize=7)
+                self.ax_ewma.legend(fontsize=6, loc="upper left")
+                self.ax_ewma.grid(True)
 
             # Update Health Timeline (debounced runtime state over time)
             if self.health_state_history:

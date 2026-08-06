@@ -78,5 +78,9 @@ class EwmaPeakDecision:
         return self._peak
 
     @property
+    def smoothed(self) -> float:
+        return self._smoothed if self._smoothed is not None else 0.0
+
+    @property
     def state(self) -> str:
         return "INFESTED" if self._peak > self.config.cutoff else "HEALTHY"
