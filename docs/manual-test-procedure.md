@@ -19,17 +19,23 @@ fallback by deliberate choice (see `docs/decision-cutoff-maintenance.md`).
 
 ## Prerequisites
 
-- Launch with `python launcher.py` (needs the full-stack `.venv`: tensorflow, librosa,
-  tkinter, sounddevice).
+- `source .venv/bin/activate` then `python launcher.py` from the repo root (needs the
+  full-stack `.venv`: tensorflow, librosa, tkinter, sounddevice — `launcher.py` checks
+  and installs anything missing).
 - For the live-mic part: a piezo sensor connected. If none is available, skip Part 3 and
   do WAV-only.
+- You do **not** need to relaunch the app between models in Part 1 — switching the model
+  in Settings and clicking START TEST again reloads everything fresh each time.
 - Sample WAV files are already in the repo — no external corpus needed:
   - `test_data/T/TP_9_1_1_20251224_101549.wav` (infested, 20.0s)
   - `test_data/F/TN_9_0_5_20251223_092425.wav` (healthy, 20.0s)
 
 ## Part 1 — Model load sanity check (repeat for all 4 models)
 
-1. Launch the app.
+1. Launch the app. Input Source defaults to **Microphone** — if you don't have a sensor
+   connected for this part, switch it to **Wav File** and **Browse** to
+   `test_data/T/TP_9_1_1_20251224_101549.wav` first, so START TEST has something valid
+   to run against regardless of model choice.
 2. `⚙ Settings` → **Model & Scaler** tab → pick a model from the dropdown → **Close**.
 3. Click **START TEST** — this is what actually triggers `load_resources()` (picking the
    model in the dropdown alone only stages the path; nothing loads until a test starts).
@@ -37,8 +43,10 @@ fallback by deliberate choice (see `docs/decision-cutoff-maintenance.md`).
    Click **STOP TEST** once you've checked them, then move to the next model.
 4. In the Status log, check for, in order:
    - `Loaded Model: model.tflite`
-   - `Model input shape: (1, 98, 32, 1)` for `9_1_1`/`9_1_2`/`9_0_5`, or
-     `(1, 784, 32, 1)` for `one_shot`
+   - `Model input shape: (np.int32(1), np.int32(98), np.int32(32), np.int32(1))` for
+     `9_1_1`/`9_1_2`/`9_0_5`, or the same with `np.int32(784)` in the second slot for
+     `one_shot` (the `np.int32(...)` wrapping is normal — that's just how this numpy
+     version prints a shape tuple, not an error)
    - `Decision cutoff: ...` + `source: ...` — compare against the table above
 5. For `one_shot` specifically, also confirm: **Inference Mode** in Settings →
    Acquisition & Output is forced to **Single Shot** (radio button greyed toward it /
@@ -118,6 +126,27 @@ line exceeding the purple line (peak must always be ≥ current smoothed value).
 5. **For `9_0_5`:** treat any verdict as approximate per the `SHIPPED DEFAULT` warning —
    don't read too much into a borderline call on this model specifically until it has
    its own fitted cutoff.
+
+## Known weak spots (not new bugs if you see them)
+
+If you test with recordings beyond the two `test_data/` sanity files, keep these
+already-investigated findings in mind so they don't read as new problems:
+
+- **`9_0_5` is the weakest of the four models generally** — lowest accuracy in its refit,
+  and it missed a known-infested sanity file even when tried against its own best fitted
+  cutoff (not just the borrowed fallback). Don't trust a borderline `9_0_5` call much.
+- **Recordings from Jan–Apr 2021 are a known hard spot for `9_1_1`, `9_1_2`, and
+  `one_shot`** (elevated false-negative *and* false-positive rates in that window,
+  fading to normal by mid-2021) — this also shows up in the old production rule, so it
+  predates all of today's changes and isn't specific to any model. We checked whether
+  this is a recurring seasonal (temperature/larval-activity) effect by comparing the
+  same calendar months across other years — it isn't; only that specific historical
+  window is affected. If you're testing with vintage 2021 field recordings specifically,
+  expect worse accuracy than usual across the board.
+- **A verdict that barely crosses (or barely misses) the cutoff is not a red flag on its
+  own** — several real recordings score within ~0.02 of the line in either direction.
+  Only a *wrong* verdict (not a close one) on a confidently-labeled file is worth
+  investigating.
 
 ## What would indicate an actual problem (vs. expected behavior)
 
