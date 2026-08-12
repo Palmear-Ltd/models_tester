@@ -55,3 +55,4 @@ click_template_windowed_manifest.csv
 evaluation_report.csv
 evaluation_report_*.csv
 plots/
+test_data
