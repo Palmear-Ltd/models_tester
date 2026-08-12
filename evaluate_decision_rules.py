@@ -47,12 +47,15 @@ from app.decision.baselines import (
 from app.decision.fixed_sample import classify as quantile_classify
 from app.decision.fixed_sample import fit_quantile_thresholds
 from app.decision.likelihood import FittedLikelihood, fit_beta_params
+from app.decision.rms_confidence import RmsConfidenceConfig
 from app.decision.sprt import SPRTAccumulator, SPRTConfig
 from app.decision.threshold import DEFAULT_SPAN, ThresholdConfig
 
 try:
+    from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import roc_auc_score, roc_curve
 except ImportError:  # pragma: no cover - sklearn is a declared project dependency
+    LogisticRegression = None
     roc_auc_score = None
     roc_curve = None
 
@@ -531,6 +534,203 @@ def ewma_quantile_cross_check(candidates, span):
     return sorted(bands, key=lambda b: b.t_high - b.t_low)[len(bands) // 2]
 
 
+def load_rms_manifest(path):
+    """Reads scripts/rms_scan.py's output CSV into `path -> {"mean_rms", "peak_rms"}`
+    session aggregates (mean / max of the per-window RMS trace). Sessions with no scanned
+    windows (e.g. a file too short to fill the buffer once) are omitted."""
+    aggregates = {}
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            try:
+                values = json.loads(row["rms_json"])
+            except (KeyError, TypeError, json.JSONDecodeError):
+                continue
+            if not values:
+                continue
+            aggregates[row["path"]] = {
+                "mean_rms": float(sum(values) / len(values)),
+                "peak_rms": float(max(values)),
+            }
+    return aggregates
+
+
+def _logistic_prob(a, b, x):
+    """sigmoid(a*x + b), clamped against OverflowError on a degenerate/near-separable
+    1D fit (LogisticRegression can return very large coefficients when a branch's
+    train examples happen to be perfectly separable in log-RMS)."""
+    z = a * x + b
+    if z >= 0:
+        return 1.0 / (1.0 + math.exp(-min(z, 700.0)))
+    ez = math.exp(max(z, -700.0))
+    return ez / (1.0 + ez)
+
+
+def fit_logistic_1d(x_values, y_labels):
+    """Fits sigmoid(a*x + b) via 1D logistic regression. Returns (a, b), or None if
+    sklearn is unavailable or the labels are single-class (nothing to separate)."""
+    if LogisticRegression is None or len(x_values) < 2 or len(set(y_labels)) < 2:
+        return None
+    X = np.asarray(x_values, dtype=np.float64).reshape(-1, 1)
+    y = np.asarray(y_labels, dtype=np.int64)
+    model = LogisticRegression()
+    model.fit(X, y)
+    return float(model.coef_[0][0]), float(model.intercept_[0])
+
+
+def _rms_pool_examples(records, rms_by_path, cutoff, span, feature):
+    """For each record with a matching RMS aggregate, resolves its predicted state under
+    the given (already-fitted) ewma_peak cutoff/span and buckets it into the INFESTED
+    pool (TP/FP) or HEALTHY pool (TN/FN) per the design doc. Returns
+    (infested_x, infested_y, healthy_x, healthy_y): x is log(rms) under `feature`
+    ("mean_rms"/"peak_rms"), y is 1 if the verdict was correct, 0 otherwise."""
+    infested_x, infested_y, healthy_x, healthy_y = [], [], [], []
+    for r in records:
+        agg = rms_by_path.get(r.path)
+        if agg is None:
+            continue
+        rms_value = agg[feature]
+        if rms_value is None or rms_value <= 0.0 or not math.isfinite(rms_value):
+            continue
+        predicted = ewma_peak(r.scores, cutoff, span=span).final_state
+        x = math.log(rms_value)
+        if predicted == "INFESTED":
+            infested_x.append(x)
+            infested_y.append(1 if r.label == "T" else 0)
+        else:
+            healthy_x.append(x)
+            healthy_y.append(1 if r.label == "F" else 0)
+    return infested_x, infested_y, healthy_x, healthy_y
+
+
+def _branch_auc(a, b, xs, ys):
+    if a is None or roc_auc_score is None or len(set(ys)) < 2:
+        return None
+    probs = [_logistic_prob(a, b, x) for x in xs]
+    try:
+        return float(roc_auc_score(ys, probs))
+    except ValueError:
+        return None
+
+
+# Below this many FN (or FP) train examples in a branch, a sharp tercile split on the
+# fitted probability overstates confidence in a curve fit on very few points -- widen
+# the trust-tier "medium" band instead (25th/75th percentile) rather than the usual
+# 33rd/67th. The design doc's own risk flag: the FN branch was n=97 corpus-wide at
+# writing time, and a 70/30 train/test split shrinks that further.
+THIN_BRANCH_THRESHOLD = 30
+
+
+def fit_rms_confidence(records, train, test, cutoff, span, rms_manifest_path):
+    """Fits the two sigmoid(a*log(rms)+b) verdict-confidence branches (design: docs/
+    superpowers/specs/2026-08-09-rms-verdict-confidence-design.md), trying both mean_rms
+    and peak_rms and keeping whichever gets the better held-out TEST-split AUC (averaged
+    across both branches). Returns a dict of fitted RmsConfidenceConfig fields, or None
+    if there isn't enough labeled+RMS-matched data to fit either feature."""
+    rms_by_path = load_rms_manifest(rms_manifest_path)
+    matched = sum(1 for r in records if r.path in rms_by_path)
+    print("\n=== RMS verdict-confidence fit ===")
+    print(f"  RMS manifest: {rms_manifest_path} ({len(rms_by_path)} sessions with RMS)")
+    print(f"  {matched}/{len(records)} labeled sessions have a matching RMS aggregate")
+    print(f"  Conditioned on ewma_peak cutoff={cutoff!r}, span={span}")
+
+    best = None
+    for feature in ("mean_rms", "peak_rms"):
+        train_inf_x, train_inf_y, train_heal_x, train_heal_y = _rms_pool_examples(
+            train, rms_by_path, cutoff, span, feature
+        )
+        test_inf_x, test_inf_y, test_heal_x, test_heal_y = _rms_pool_examples(
+            test, rms_by_path, cutoff, span, feature
+        )
+        infested_fit = fit_logistic_1d(train_inf_x, train_inf_y)
+        healthy_fit = fit_logistic_1d(train_heal_x, train_heal_y)
+        if infested_fit is None or healthy_fit is None:
+            print(f"  {feature}: not enough data/labels in one branch to fit; skipping.")
+            continue
+        a_inf, b_inf = infested_fit
+        a_heal, b_heal = healthy_fit
+        infested_auc = _branch_auc(a_inf, b_inf, test_inf_x, test_inf_y)
+        healthy_auc = _branch_auc(a_heal, b_heal, test_heal_x, test_heal_y)
+        aucs = [v for v in (infested_auc, healthy_auc) if v is not None]
+        combined_auc = float(np.mean(aucs)) if aucs else None
+        n_fn_train = sum(1 for y in train_heal_y if y == 0)
+        n_fp_train = sum(1 for y in train_inf_y if y == 0)
+        print(
+            f"  {feature}: INFESTED n_train={len(train_inf_y)} test_auc={_fmt(infested_auc)} | "
+            f"HEALTHY n_train={len(train_heal_y)} (n_fn_train={n_fn_train}, n_fp_train={n_fp_train}) "
+            f"test_auc={_fmt(healthy_auc)} | combined={_fmt(combined_auc)}"
+        )
+        candidate = {
+            "feature": feature,
+            "a_infested": a_inf, "b_infested": b_inf,
+            "a_healthy": a_heal, "b_healthy": b_heal,
+            "n_infested_fit": len(train_inf_y), "n_healthy_fit": len(train_heal_y),
+            "n_fn_train": n_fn_train, "n_fp_train": n_fp_train,
+            "combined_auc": combined_auc,
+            "test_inf_x": test_inf_x, "test_heal_x": test_heal_x,
+        }
+        if best is None or (
+            combined_auc is not None and (best["combined_auc"] is None or combined_auc > best["combined_auc"])
+        ):
+            best = candidate
+
+    if best is None:
+        print("  Could not fit either feature (insufficient labeled+RMS-matched data per branch).")
+        return None
+
+    print(f"  Winning feature: {best['feature']} (combined held-out test AUC={_fmt(best['combined_auc'])})")
+
+    # Trust-tier cutoffs, chosen on the winning curve's fitted probability across ALL
+    # held-out TEST sessions (both pools combined -- probability is a single 0..1
+    # "P(verdict correct)" scale regardless of which branch produced it, so pooling is
+    # the right unit to set tiers on).
+    all_probs = (
+        [_logistic_prob(best["a_infested"], best["b_infested"], x) for x in best["test_inf_x"]]
+        + [_logistic_prob(best["a_healthy"], best["b_healthy"], x) for x in best["test_heal_x"]]
+    )
+    thin = best["n_fn_train"] < THIN_BRANCH_THRESHOLD or best["n_fp_train"] < THIN_BRANCH_THRESHOLD
+    lo_q, hi_q = (25.0, 75.0) if thin else (33.0, 67.0)
+    if all_probs:
+        lo_edge = float(np.percentile(all_probs, lo_q))
+        hi_edge = float(np.percentile(all_probs, hi_q))
+        if hi_edge <= lo_edge:
+            hi_edge = lo_edge + 1e-6
+    else:
+        lo_edge, hi_edge = 0.4, 0.6
+    print(
+        f"  tier_edges: ({lo_edge:.4f}, {hi_edge:.4f})  "
+        f"[{lo_q:g}th/{hi_q:g}th percentile of {len(all_probs)} held-out session probabilities"
+        + (", widened: a branch's error class is thin (<%d)]" % THIN_BRANCH_THRESHOLD if thin else "]")
+    )
+
+    return {
+        "a_infested": best["a_infested"], "b_infested": best["b_infested"],
+        "a_healthy": best["a_healthy"], "b_healthy": best["b_healthy"],
+        "feature": best["feature"], "tier_edges": (lo_edge, hi_edge),
+        "n_infested_fit": best["n_infested_fit"], "n_healthy_fit": best["n_healthy_fit"],
+    }
+
+
+def write_rms_confidence_config(path, fitted):
+    """Writes the app's rms_confidence.json. main.py:load_resources reads this from next
+    to the model, same as decision_threshold.json -- shipping a refit is just dropping
+    this file into models/<name>/, no code change."""
+    config = RmsConfidenceConfig(
+        a_infested=float(fitted["a_infested"]),
+        b_infested=float(fitted["b_infested"]),
+        a_healthy=float(fitted["a_healthy"]),
+        b_healthy=float(fitted["b_healthy"]),
+        feature=fitted["feature"],
+        tier_edges=(float(fitted["tier_edges"][0]), float(fitted["tier_edges"][1])),
+        n_infested_fit=int(fitted["n_infested_fit"]),
+        n_healthy_fit=int(fitted["n_healthy_fit"]),
+    )
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(config.to_json())
+    return config
+
+
 def run(args):
     records, excluded = load_manifest(args.manifest)
     n_t = sum(1 for r in records if r.label == "T")
@@ -573,6 +773,31 @@ def run(args):
 
     _report_fitted_cutoff(args, candidates, results)
 
+    if args.rms_manifest:
+        picked = _best_ewma_cutoff_and_span(candidates, results)
+        if picked is None:
+            print("\nNo ewma_peak candidate was fitted; cannot fit RMS verdict confidence.")
+        else:
+            rms_cutoff, rms_span = picked
+            fitted = fit_rms_confidence(records, train, test, rms_cutoff, rms_span, args.rms_manifest)
+            if fitted is not None and args.rms_confidence_out:
+                write_rms_confidence_config(args.rms_confidence_out, fitted)
+                print(f"\nWrote {args.rms_confidence_out}")
+                print("  Copy it to models/<model>/rms_confidence.json to activate it.")
+            elif fitted is not None:
+                print("\n(Pass --rms-confidence-out models/<model>/rms_confidence.json to ship this.)")
+
+
+def _best_ewma_cutoff_and_span(candidates, results):
+    """Picks the (cutoff, span) of whichever ewma_peak(span=...) candidate the test-split
+    ranking already preferred -- shared by the cutoff report and the RMS-confidence fit
+    below, which conditions its pools on this same already-fitted cutoff."""
+    best_ewma_result = next((r for r in results if r["name"].startswith("ewma_peak(")), None)
+    if best_ewma_result is None:
+        return None
+    ewma = next(c for c in candidates if c["name"] == best_ewma_result["name"])
+    return ewma["fitted_cutoff"], ewma["span"]
+
 
 def _report_fitted_cutoff(args, candidates, results):
     """Prints the fitted EWMA-peak cutoff at full precision (the summary table rounds to
@@ -581,13 +806,11 @@ def _report_fitted_cutoff(args, candidates, results):
     Several span variants were fit (EWMA_SPAN_SWEEP) and ranked on the test split
     alongside every other candidate rule; this picks whichever span variant that ranking
     already preferred, rather than assuming a single fixed span."""
-    best_ewma_result = next((r for r in results if r["name"].startswith("ewma_peak(")), None)
-    if best_ewma_result is None:
+    picked = _best_ewma_cutoff_and_span(candidates, results)
+    if picked is None:
         print("\nNo ewma_peak candidate was fitted; nothing to emit.")
         return
-    ewma = next(c for c in candidates if c["name"] == best_ewma_result["name"])
-
-    cutoff, span = ewma["fitted_cutoff"], ewma["span"]
+    cutoff, span = picked
     print("\n=== Fitted EWMA-peak cutoff ===")
     print(f"  Best span (of {EWMA_SPAN_SWEEP}, by test-set accuracy_conservative): {span:g}")
     print(f"  ROC-optimal (Youden J) cutoff: {cutoff!r}  (span={span})")
@@ -625,6 +848,19 @@ def main():
         default=None,
         help="Write the fitted EWMA-peak cutoff here as a decision_threshold.json the "
         "app can load (e.g. models/9_1_2/decision_threshold.json).",
+    )
+    parser.add_argument(
+        "--rms-manifest",
+        default=None,
+        help="scripts/rms_scan.py output CSV (path,label,...,rms_json), joined by `path` "
+        "onto this run's labeled sessions to fit the RMS verdict-confidence curves "
+        "(see app/decision/rms_confidence.py). Omit to skip that stage entirely.",
+    )
+    parser.add_argument(
+        "--rms-confidence-out",
+        default=None,
+        help="Write the fitted RMS verdict-confidence curves here as an rms_confidence.json "
+        "the app can load (e.g. models/9_1_2/rms_confidence.json). Requires --rms-manifest.",
     )
     args = parser.parse_args()
     run(args)

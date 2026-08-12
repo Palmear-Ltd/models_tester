@@ -39,8 +39,19 @@ reports/
 
 # Offline decision-rule evaluation artifacts (app/decision harness)
 .score_cache/
+.rms_cache/
+.rms_cache_bp/
+.click_cache/
+.click_template_cache/
+.click_template_windowed_cache/
 manifest.csv
 manifest_*.csv
+rms_manifest.csv
+rms_manifest_*.csv
+click_manifest.csv
+click_manifest_*.csv
+click_template_manifest.csv
+click_template_windowed_manifest.csv
 evaluation_report.csv
 evaluation_report_*.csv
 plots/
