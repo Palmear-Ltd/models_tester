@@ -169,7 +169,35 @@ Enable **"Save results and audio"** to:
   - ORANGE = Suspicious (between thresholds)
   - RED = Infested (above infested threshold)
 - **Current Energy (RMS)**: Real-time audio energy level
-- **Verdict confidence**: shown alongside the diagnosis (e.g. "INFESTED (EWMA peak: 0.71) — verdict confidence: low") — an independent low/medium/high trust signal based on the session's recorded energy level, since unusually loud or unusually quiet sessions correlate with the model getting the call wrong in a specific, predictable direction. It never changes the diagnosis itself, only how much to trust it.
+- **Verdict confidence**: shown alongside the diagnosis (e.g. "INFESTED (EWMA peak: 0.71) — verdict confidence: low") — an independent low/medium/high trust signal, based on the session's recorded energy level, for how much to trust *this specific verdict*. It never changes the diagnosis itself. **See "New Advisory Signals" just below before relying on this in the field.**
+
+## ⚠️ New Advisory Signals (read this before trusting them)
+
+Two signals were added in August 2026 to help judge whether a given verdict is
+trustworthy: **verdict confidence** (above) and a refinement to the sensor-link click
+detector (below). Both are real, evidence-based, and safe to run — they never override
+or change the classifier's diagnosis, only annotate it — but neither has been through a
+field validation round yet, and both should be treated as **advisory, not authoritative**
+during this first round of field testing:
+
+- **Verdict confidence** is fit from historical recordings, not live field data, and its
+  held-out accuracy is moderate (meaningfully better than a coin flip, well short of
+  reliable) — a "low" reading is a hint to double-check the session, not proof the
+  diagnosis is wrong.
+- **The refined click detection** behind the sensor-link "Likely cause" label was
+  validated against a small set of confirmed sensor-fault recordings (8 files) — enough
+  to show it works better than the previous version for *that specific* problem
+  (loose/damaged cable contact), but it is **not** a general false-positive fixer. If a
+  session gets flagged INFESTED and you suspect it's wrong for a reason other than a
+  sensor/cable fault (e.g. wind, handling noise, a nearby animal), this feature won't
+  catch it.
+- **What helps most right now:** every flagged session and validation run is already
+  auto-saved as JSON under `reports/` (see "Testing in the field" further below) —
+  the single most valuable thing field engineers can do is keep testing
+  normally and let that data accumulate, especially genuine sensor faults and confirmed
+  infestations as they occur naturally. That's exactly how the existing sensor-link
+  detector's thresholds were tuned twice before, and how both new signals will get
+  tightened next.
 
 ## 🔌 Sensor/Cable Link Health Detection
 
@@ -178,7 +206,7 @@ The tool continuously monitors the physical link between the piezo sensor (needl
 ### What it detects
 
 - **Complete signal loss** — a fully broken or disconnected cable (dead silence)
-- **Clicking/crackling** — an intermittent or loose connection cutting in and out (distinguished from real insect chewing sounds by comparing each click's spectral shape against a fitted "what a real bite sounds like" reference, not just how many clicks occurred)
+- **Clicking/crackling** — an intermittent or loose connection cutting in and out (distinguished from real insect chewing sounds by comparing each click's spectral shape against a fitted "what a real bite sounds like" reference, not just how many clicks occurred — see "New Advisory Signals" above for this refinement's validated scope)
 - **Recurring dropouts** — the same problem repeating across several seconds of recording, not just a one-off glitch
 
 When a problem is detected you'll see, in real time:
@@ -275,7 +303,7 @@ This is a research tool for bioacoustic analysis. For modifications:
 1. Code is organized in the `app/` directory
 2. Follow the existing module structure
 3. Add tests for new features
-4. Update documentation
+4. Update documentation, including `CHANGELOG.md`
 
 ## 📄 License
 
