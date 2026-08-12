@@ -30,6 +30,8 @@ from app.health.serialization import (
 from app.health import rootcause
 from app.ui import SettingsDialog
 from app.decision.threshold import EwmaPeakDecision, default_config as default_decision_config
+from app.decision import rms_confidence
+from app.decision.rms_confidence import default_config as default_rms_confidence_config
 
 SAMPLE_RATE = 44100  # acquisition sample rate (Hz); the whole pipeline runs at this rate
 VALIDATION_WINDOWS = 40  # ~20 s of validation at 0.5 s per window
@@ -159,6 +161,14 @@ class ModelsTesterApp:
         # chosen). Reloaded per model directory in load_resources().
         self.decision_config = default_decision_config()
         self.decision_accumulator = None
+
+        # Session-level verdict-confidence trust tier (additive, never changes the verdict
+        # itself -- see app/decision/rms_confidence.py). Reloaded per model directory in
+        # load_resources(), same as decision_config above. Populated by
+        # calculate_diagnosis() (sliding-window mode only); None until then.
+        self.rms_confidence_config = default_rms_confidence_config()
+        self.verdict_confidence_probability = None
+        self.verdict_confidence_tier = None
 
         self._setup_ui()
         self._load_settings()
@@ -548,6 +558,25 @@ class ModelsTesterApp:
                 "verdicts are approximate"
             )
 
+        # Load the RMS-based verdict-confidence curves (session-level trust tier,
+        # additive-only -- see app/decision/rms_confidence.py) from next to the model, if
+        # present; same fallback-on-missing-file idiom and transparency logging as the
+        # decision cutoff above.
+        rms_confidence_path = os.path.join(os.path.dirname(model_path), "rms_confidence.json")
+        rms_confidence_fitted_for_this_model = os.path.isfile(rms_confidence_path)
+        self.rms_confidence_config = default_rms_confidence_config(config_path=rms_confidence_path)
+        self.log(
+            f"Verdict confidence: feature={self.rms_confidence_config.feature}, "
+            f"tiers@{self.rms_confidence_config.tier_edges}"
+        )
+        if rms_confidence_fitted_for_this_model:
+            self.log(f"  source: fitted for this model ({os.path.basename(rms_confidence_path)})")
+        else:
+            self.log(
+                f"  source: SHIPPED DEFAULT — not fitted for "
+                f"{os.path.basename(os.path.dirname(model_path))}; trust tiers are approximate"
+            )
+
         return True
 
     def toggle_test(self):
@@ -571,6 +600,8 @@ class ModelsTesterApp:
         self.energy_history = []
         self.ewma_history = []
         self.health_state_history = []
+        self.verdict_confidence_probability = None
+        self.verdict_confidence_tier = None
         self.runtime_monitor = RuntimeMonitor()
         self._last_anomalous = False
         self._last_root_cause = None
@@ -647,7 +678,25 @@ class ModelsTesterApp:
         state = self.decision_accumulator.state
         predicted_infested = state == "INFESTED"
         color = "red" if predicted_infested else "green"
-        self.diag_label.configure(text=f"{state} (EWMA peak: {peak:.3f})", foreground=color)
+        label_text = f"{state} (EWMA peak: {peak:.3f})"
+
+        # Session-level verdict confidence (additive-only trust tier; NEVER influences
+        # `state`/`predicted_infested` above -- see app/decision/rms_confidence.py). Uses
+        # the same session RMS trace already accumulated for the live energy bar.
+        self.verdict_confidence_probability = None
+        self.verdict_confidence_tier = None
+        if self.energy_history:
+            rms_values = [v for _, v in self.energy_history]
+            mean_session_rms = sum(rms_values) / len(rms_values)
+            peak_session_rms = max(rms_values)
+            probability, tier = rms_confidence.estimate(
+                state, mean_session_rms, peak_session_rms, self.rms_confidence_config
+            )
+            self.verdict_confidence_probability = probability
+            self.verdict_confidence_tier = tier
+            label_text += f" — verdict confidence: {tier}"
+
+        self.diag_label.configure(text=label_text, foreground=color)
         return predicted_infested
 
     def mic_loop(self, device_idx):
@@ -871,6 +920,21 @@ class ModelsTesterApp:
             self.log(f"Health check thresholds: loaded {DEFAULT_CHECK_THRESHOLDS_PATH}")
         else:
             self.log("Health check thresholds: shipped defaults (no check_thresholds.json found)")
+
+        # T010 (ClickSpectralMatchCheck) needs a fitted differential click template to do
+        # anything -- without one it silently PASSes every window (see
+        # app/health/checks/time_domain.py:load_click_template). Log which one is active
+        # so a stale/absent template is visible here rather than discovered later as an
+        # unexplained "SENSOR_LINK never fires" gap.
+        from app.health.checks.time_domain import DEFAULT_CLICK_TEMPLATE_PATH, load_click_template
+
+        click_template = load_click_template()
+        if not click_template.enabled:
+            self.log("Click spectral template: DISABLED — no click_template.json found; T010 always PASSes")
+        elif os.path.isfile(DEFAULT_CLICK_TEMPLATE_PATH):
+            self.log(f"Click spectral template: loaded {DEFAULT_CLICK_TEMPLATE_PATH}")
+        else:
+            self.log("Click spectral template: shipped default")
 
     def _load_calibration_profile(self, path):
         from app.health.calibration import load_profile
@@ -1168,6 +1232,8 @@ class ModelsTesterApp:
                 "decision_span": self.decision_config.span,
                 "decision_final_state": self.decision_accumulator.state if self.decision_accumulator else None,
                 "decision_ewma_peak": self.decision_accumulator.peak if self.decision_accumulator else None,
+                "verdict_confidence_tier": self.verdict_confidence_tier,
+                "verdict_confidence_probability": self.verdict_confidence_probability,
                 "n_mels": self.n_mels_var.get(),
                 "seq_len": self.seq_len_var.get(),
                 "low_cut": self.low_cut_var.get(),

@@ -169,6 +169,7 @@ Enable **"Save results and audio"** to:
   - ORANGE = Suspicious (between thresholds)
   - RED = Infested (above infested threshold)
 - **Current Energy (RMS)**: Real-time audio energy level
+- **Verdict confidence**: shown alongside the diagnosis (e.g. "INFESTED (EWMA peak: 0.71) — verdict confidence: low") — an independent low/medium/high trust signal based on the session's recorded energy level, since unusually loud or unusually quiet sessions correlate with the model getting the call wrong in a specific, predictable direction. It never changes the diagnosis itself, only how much to trust it.
 
 ## 🔌 Sensor/Cable Link Health Detection
 
@@ -177,7 +178,7 @@ The tool continuously monitors the physical link between the piezo sensor (needl
 ### What it detects
 
 - **Complete signal loss** — a fully broken or disconnected cable (dead silence)
-- **Clicking/crackling** — an intermittent or loose connection cutting in and out
+- **Clicking/crackling** — an intermittent or loose connection cutting in and out (distinguished from real insect chewing sounds by comparing each click's spectral shape against a fitted "what a real bite sounds like" reference, not just how many clicks occurred)
 - **Recurring dropouts** — the same problem repeating across several seconds of recording, not just a one-off glitch
 
 When a problem is detected you'll see, in real time:
