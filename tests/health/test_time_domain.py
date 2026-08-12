@@ -1,6 +1,9 @@
 import numpy as np
 
+from app.health.checks import time_domain
 from app.health.checks.time_domain import (
+    ClickSpectralMatchCheck,
+    ClickTemplateConfig,
     ClickTransientCheck,
     ClippingCheck,
     CrestFactorCheck,
@@ -10,6 +13,7 @@ from app.health.checks.time_domain import (
     PeakAmplitudeCheck,
     SignalEnergyCheck,
     ZeroCrossingRateCheck,
+    load_click_template,
 )
 from app.health.models import AudioWindow, CheckCategory, CheckStatus
 
@@ -277,3 +281,188 @@ def test_click_new_defaults_are_15_and_30():
     check = ClickTransientCheck()
     assert check.warn_count == NEW_WARN_COUNT
     assert check.fault_count == NEW_FAULT_COUNT
+
+
+# ---------------------------------------------------------------------------
+# T010 ClickSpectralMatchCheck (docs/superpowers/specs/
+# 2026-08-09-rootcause-click-template-refinement-design.md)
+#
+# Detection re-uses T009's algorithm (independent re-implementation, not a T009
+# dependency); the new logic under test is: (1) ClickTemplateConfig loading/fallback
+# never raises, (2) a window with too few clicks always PASSes regardless of match
+# scores, (3) the match_fraction PASS/WARNING/FAIL banding. For (3) and (2), the real
+# FFT/spectral-binning arithmetic (`_click_spectrum`) is already exercised at corpus
+# scale by fit_click_template.py's decision-gate run (see rootcause.py's weight-table
+# comment for those numbers) -- these unit tests monkeypatch `_click_spectrum` to return
+# controlled, deterministic spectra so the check's own aggregation/threshold logic can be
+# tested precisely, independent of real audio content.
+# ---------------------------------------------------------------------------
+
+
+def _template_config(n_bins=4, match_threshold=0.5):
+    # A simple one-hot template; matching/non-matching fake spectra below are chosen
+    # relative to it, not to any real click acoustics.
+    template = np.array([1.0, 0.0, 0.0, 0.0])
+    return ClickTemplateConfig(
+        n_bins=n_bins, freq_max_hz=8000.0, template=template, match_threshold=match_threshold
+    )
+
+
+_MATCHING_SPEC = np.array([1.0, 0.0, 0.0, 0.0])  # dot with template above = 1.0 >= 0.5
+_NONMATCHING_SPEC = np.array([0.0, 1.0, 0.0, 0.0])  # dot = 0.0 < 0.5
+
+
+def _fake_spectrum_cycle(pattern):
+    """Returns a fake `_click_spectrum` that yields `pattern` values in order, one per
+    call (one call per detected click, in detection order), for monkeypatching."""
+    it = iter(pattern)
+
+    def _fake(x, peak_idx, sr, half_ms, n_bins, freq_max):
+        return next(it)
+
+    return _fake
+
+
+def test_click_spectral_match_category_is_primary():
+    assert ClickSpectralMatchCheck.category is CheckCategory.PRIMARY
+
+
+def test_click_spectral_match_passes_on_full_silence():
+    check = ClickSpectralMatchCheck(template_config=_template_config())
+    result = check.run(_win(np.zeros(N)), {})
+    assert result.status is CheckStatus.PASS
+    assert result.measurements == []
+
+
+def test_click_spectral_match_passes_on_clean_sine():
+    check = ClickSpectralMatchCheck(template_config=_template_config())
+    result = check.run(_win(_sine(amp=0.3)), {})
+    assert result.status is CheckStatus.PASS
+
+
+def test_click_spectral_match_passes_when_template_disabled():
+    # ClickTemplateConfig() with no `template=` given is disabled (template=None) -- the
+    # missing/malformed-file fallback. Even a dense click burst must always PASS.
+    disabled = ClickTemplateConfig()
+    assert disabled.enabled is False
+    check = ClickSpectralMatchCheck(template_config=disabled)
+    x = _click_burst(20)
+    result = check.run(_win(x), {})
+    assert result.status is CheckStatus.PASS
+
+
+def test_click_spectral_match_passes_below_min_click_count(monkeypatch):
+    # 3 clicks, all "non-matching" -- would be FAIL if scored, but min_click_count=5
+    # (default) means there isn't enough evidence to judge, so it must PASS.
+    monkeypatch.setattr(time_domain, "_click_spectrum", _fake_spectrum_cycle([_NONMATCHING_SPEC] * 3))
+    check = ClickSpectralMatchCheck(template_config=_template_config())
+    x = _click_burst(3)
+    result = check.run(_win(x), {})
+    assert result.status is CheckStatus.PASS
+    assert _measure(result, "click_count") == 3
+    assert _measure(result, "matched_click_count") == 0.0
+
+
+def test_click_spectral_match_fails_when_mostly_unmatched(monkeypatch):
+    # 10 clicks, 1 matches (fraction 0.1) -- below the default fault_max_fraction (0.2).
+    pattern = [_MATCHING_SPEC] + [_NONMATCHING_SPEC] * 9
+    monkeypatch.setattr(time_domain, "_click_spectrum", _fake_spectrum_cycle(pattern))
+    check = ClickSpectralMatchCheck(template_config=_template_config(), min_click_count=5)
+    x = _click_burst(10)
+    result = check.run(_win(x), {})
+    assert result.status is CheckStatus.FAIL
+    assert _measure(result, "matched_click_count") == 1.0
+    assert abs(_measure(result, "match_fraction") - 0.1) < 1e-9
+
+
+def test_click_spectral_match_warns_on_mixed_match(monkeypatch):
+    # 10 clicks, 4 match (fraction 0.4) -- between fault_max_fraction (0.2) and
+    # warn_max_fraction (0.5).
+    pattern = [_MATCHING_SPEC] * 4 + [_NONMATCHING_SPEC] * 6
+    monkeypatch.setattr(time_domain, "_click_spectrum", _fake_spectrum_cycle(pattern))
+    check = ClickSpectralMatchCheck(template_config=_template_config(), min_click_count=5)
+    x = _click_burst(10)
+    result = check.run(_win(x), {})
+    assert result.status is CheckStatus.WARNING
+    assert abs(_measure(result, "match_fraction") - 0.4) < 1e-9
+
+
+def test_click_spectral_match_passes_when_mostly_matched(monkeypatch):
+    # 10 clicks, 9 match (fraction 0.9) -- above warn_max_fraction (0.5).
+    pattern = [_MATCHING_SPEC] * 9 + [_NONMATCHING_SPEC]
+    monkeypatch.setattr(time_domain, "_click_spectrum", _fake_spectrum_cycle(pattern))
+    check = ClickSpectralMatchCheck(template_config=_template_config(), min_click_count=5)
+    x = _click_burst(10)
+    result = check.run(_win(x), {})
+    assert result.status is CheckStatus.PASS
+    assert abs(_measure(result, "match_fraction") - 0.9) < 1e-9
+
+
+def test_click_spectral_match_skips_edge_clicks_gracefully():
+    # A click too close to the window edge for a +/-30ms snippet: _click_spectrum
+    # returns None for it (real, unpatched code path) -- it must count toward
+    # click_count but never toward matched_click_count, and must not raise.
+    check = ClickSpectralMatchCheck(template_config=_template_config(), min_click_count=1)
+    x = _sine(amp=0.3)
+    x[0] = 1.0  # spike at sample 0 -- no room for a snippet before it
+    result = check.run(_win(x), {})
+    assert result.status in (CheckStatus.PASS, CheckStatus.WARNING, CheckStatus.FAIL)
+    assert _measure(result, "click_count") >= 1
+    assert _measure(result, "matched_click_count") == 0.0
+
+
+# --- ClickTemplateConfig / load_click_template: load-JSON-with-fallback idiom ---
+
+
+def test_click_template_config_disabled_by_default():
+    assert ClickTemplateConfig().enabled is False
+    assert ClickTemplateConfig().template is None
+
+
+def test_load_click_template_falls_back_when_file_missing(tmp_path):
+    missing = tmp_path / "does_not_exist.json"
+    config = load_click_template(str(missing))
+    assert isinstance(config, ClickTemplateConfig)
+    assert config.enabled is False
+
+
+def test_load_click_template_falls_back_on_malformed_json(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not valid json", encoding="utf-8")
+    config = load_click_template(str(bad))
+    assert config.enabled is False
+
+
+def test_load_click_template_falls_back_when_template_length_mismatches_n_bins(tmp_path):
+    bad = tmp_path / "mismatched.json"
+    bad.write_text(
+        '{"n_bins": 40, "freq_max_hz": 8000.0, "template": [1.0, 2.0], "match_threshold": 0.1}',
+        encoding="utf-8",
+    )
+    config = load_click_template(str(bad))
+    assert config.enabled is False
+
+
+def test_load_click_template_round_trips_valid_json(tmp_path):
+    path = tmp_path / "click_template.json"
+    path.write_text(
+        '{"n_bins": 4, "freq_max_hz": 8000.0, "template": [1.0, 0.0, 0.0, 0.0], '
+        '"match_threshold": 0.25, "fitted_against": "unit test", "fitted_date": "2026-08-09"}',
+        encoding="utf-8",
+    )
+    config = load_click_template(str(path))
+    assert config.enabled is True
+    assert config.n_bins == 4
+    assert config.freq_max_hz == 8000.0
+    assert config.match_threshold == 0.25
+    assert np.array_equal(config.template, np.array([1.0, 0.0, 0.0, 0.0]))
+
+
+def test_load_click_template_reads_shipped_repo_file_if_present():
+    # app/health/click_template.json is a fitted data file, not guaranteed present in
+    # every checkout (e.g. before it's been generated by fit_click_template.py) -- only
+    # assert on its shape/type if it happens to load, never that it must be enabled.
+    config = load_click_template()
+    assert isinstance(config, ClickTemplateConfig)
+    if config.enabled:
+        assert config.template.shape == (config.n_bins,)

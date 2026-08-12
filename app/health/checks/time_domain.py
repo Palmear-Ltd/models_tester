@@ -1,5 +1,6 @@
 """Time-domain Signal Health Checks (spec §4.8, T001–T007; T008–T009 add cable-fault
-transient detection).
+transient detection; T010 adds click spectral-template matching, see
+docs/superpowers/specs/2026-08-09-rootcause-click-template-refinement-design.md).
 
 Each check operates directly on the waveform (NumPy only) and reports a status
 plus measurements. Thresholds are provisional manual defaults; Phase 3 replaces
@@ -7,7 +8,10 @@ them with calibration-derived values.
 """
 from __future__ import annotations
 
-from typing import Any
+import json
+import os
+from dataclasses import dataclass
+from typing import Any, Optional
 
 import numpy as np
 
@@ -472,5 +476,264 @@ class ClickTransientCheck(SignalHealthCheck):
                 Measurement("click_count", float(click_count)),
                 Measurement("click_rate", click_rate, unit="/s"),
             ],
+            diagnostic_messages=diagnostics,
+        )
+
+
+# ---------------------------------------------------------------------------
+# T010 -- click spectral-template matching (2026-08-09 refinement)
+# ---------------------------------------------------------------------------
+#
+# A persisted, locally-fit differential spectral template ("bite click" spectrum
+# minus "baseline contact-noise click" spectrum) that lets rootcause.py's SENSOR_LINK
+# attribution do better than raw click *count* (T009) at telling a real RPW bite click
+# apart from sensor/cable contact noise. See docs/superpowers/specs/
+# 2026-08-09-rootcause-click-template-refinement-design.md for the full evidence and
+# docs/superpowers/plans/2026-08-09-rootcause-click-template-refinement.md for how it
+# was validated (re-fit and re-evaluated under the REAL per-window production windowing,
+# not the single-pass whole-file detection an earlier pass of the same investigation used
+# -- the single-pass result did NOT automatically carry over, and had to be independently
+# re-confirmed before any of this was wired in; see fit_click_template.py).
+
+
+@dataclass(frozen=True)
+class ClickTemplateConfig:
+    """A fitted differential click spectral template, loaded from
+    app/health/click_template.json (or a shipped fallback of "disabled" if that file is
+    missing/malformed -- see load_click_template). ``template`` is ``None`` when no
+    template is available; ``enabled`` reflects that so callers don't need to know the
+    loader's fallback details.
+    """
+
+    n_bins: int = 40
+    freq_max_hz: float = 8000.0
+    template: Optional[np.ndarray] = None
+    match_threshold: float = 0.0
+
+    @property
+    def enabled(self) -> bool:
+        return self.template is not None
+
+
+DEFAULT_CLICK_TEMPLATE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "click_template.json"
+)
+
+
+def load_click_template(path: Optional[str] = None) -> ClickTemplateConfig:
+    """Loads a persisted click_template.json if present, otherwise falls back to a
+    disabled config (template=None). Never raises -- a missing/unreadable/malformed file
+    just means T010 always PASSes (no template to match against), same idiom as
+    app/decision/threshold.py's default_config() / app/health/rootcause.py's
+    default_session_config()."""
+    resolved = path if path is not None else DEFAULT_CLICK_TEMPLATE_PATH
+    if resolved is not None and os.path.exists(resolved):
+        try:
+            with open(resolved, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            template = np.asarray(data["template"], dtype=np.float64)
+            n_bins = int(data.get("n_bins", template.shape[0]))
+            if template.ndim != 1 or template.shape[0] != n_bins or n_bins <= 0:
+                raise ValueError("malformed click_template.json: template/n_bins mismatch")
+            freq_max_hz = float(data.get("freq_max_hz", 8000.0))
+            match_threshold = float(data["match_threshold"])
+            return ClickTemplateConfig(
+                n_bins=n_bins,
+                freq_max_hz=freq_max_hz,
+                template=template,
+                match_threshold=match_threshold,
+            )
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            pass
+    return ClickTemplateConfig()
+
+
+def _click_spectrum(x: np.ndarray, peak_idx: int, sr: int, half_ms: float, n_bins: int, freq_max: float):
+    """L2-normalized n_bins-bin power spectrum (0..freq_max Hz) of a Hamming-windowed
+    snippet centered on `peak_idx`. Returns None if the snippet would run off either end
+    of `x` (mirrors fit_click_template.py / scripts/click_template_scan_windowed.py's
+    click_spectrum exactly -- must stay in sync, that's what the template was fit
+    against)."""
+    half = int(sr * half_ms / 1000.0)
+    lo, hi = peak_idx - half, peak_idx + half
+    if lo < 0 or hi >= len(x):
+        return None
+    snip = x[lo:hi]
+    n = len(snip)
+    win = np.hamming(n)
+    spec = np.abs(np.fft.rfft(snip * win)) ** 2
+    freqs = np.fft.rfftfreq(n, d=1.0 / sr)
+    edges = np.linspace(0, freq_max, n_bins + 1)
+    binned = np.zeros(n_bins)
+    for i in range(n_bins):
+        m = (freqs >= edges[i]) & (freqs < edges[i + 1])
+        binned[i] = spec[m].sum() if m.any() else 0.0
+    norm = np.linalg.norm(binned)
+    if norm <= 0:
+        return None
+    return binned / norm
+
+
+class ClickSpectralMatchCheck(SignalHealthCheck):
+    """T010 -- score detected click transients against a locally-fit differential
+    spectral template to judge how "bite-like" (vs. sensor/cable contact-noise-like) a
+    window's clicking is.
+
+    Independent of T009 (re-implements the same click-detection algorithm rather than
+    depending on it, per the project's "checks stay independent, isolated" convention) --
+    but adds a second stage T009 doesn't have: each detected click's spectrum is scored
+    against `template_config` (a fitted ``ClickTemplateConfig``, see
+    ``load_click_template``) via a dot product, and a click "matches" if that score clears
+    ``template_config.match_threshold``.
+
+    A window is judged by ``match_fraction`` (matched_click_count / click_count), NOT the
+    raw matched_click_count. Real-windowing re-validation (fit_click_template.py, 2026-08)
+    found the raw matched count still scales with how much clicking is happening overall
+    -- dominated by genuinely high-activity infested (T) sessions, which have the MOST
+    real bite clicks and therefore the highest raw matched count of any group. The
+    fraction (how bite-like the clicking is, independent of its volume) is what actually
+    separates "a lot of real signal" from "a lot of contact noise, some of which happens
+    to look bite-like" -- session-level match_fraction gave AUC 0.85 for T vs. confirmed-
+    fault (FAULT-gold) recordings, and AUC 0.48 for TN (clean baseline) vs. FAULT-gold --
+    i.e. FAULT-gold reads as statistically indistinguishable from a healthy baseline by
+    this measure, while staying cleanly separated from real infestation activity. See the
+    design spec's Evidence section and fit_click_template.py's decision-gate output for
+    the full numbers this was validated against.
+
+    A window with fewer than ``min_click_count`` detected clicks always PASSes --
+    insufficient evidence to judge bite-likeness one way or the other, not a verdict.
+    If no template is loaded (``template_config.enabled`` is False -- e.g.
+    click_template.json is missing), this check always PASSes; it never raises and never
+    fabricates a verdict from an absent template.
+
+    VALIDATED SCOPE, deliberately narrow (mirrors rootcause.py's own SENSOR_LINK scope
+    note): this template is validated against the *narrow, confirmed* SENSOR_LINK
+    contact-noise signature specifically. It is NOT a general false-positive fix -- against
+    the broader, heterogeneous population of model-flagged-but-unconfirmed FPs it barely
+    beats chance (see the design spec's non-goals). A WARNING/FAIL from this check should
+    only ever be read through rootcause.py's already-narrow SENSOR_LINK framing, never as
+    "this recording is definitely wrong" on its own.
+    """
+
+    check_id = "T010"
+    check_name = "Click Spectral Match"
+    category = CheckCategory.PRIMARY
+
+    def __init__(
+        self,
+        click_k: float = 8.0,
+        merge_gap: int = 3,
+        min_click_count: int = 5,
+        # Below fault_max_fraction: predominantly non-bite-like clicking despite enough
+        # clicks to judge -> FAIL. Between fault_max_fraction and warn_max_fraction:
+        # ambiguous/mixed -> WARNING. Above warn_max_fraction: predominantly bite-like ->
+        # PASS (looks like real signal, not a link fault). Fit informally against the same
+        # corpora as fit_click_template.py's evaluation (see check_thresholds.json's T010
+        # entry for the shipped, potentially-retuned values -- these are only the
+        # constructor fallback).
+        warn_max_fraction: float = 0.5,
+        fault_max_fraction: float = 0.2,
+        snippet_ms: float = 30.0,
+        template_config: Optional[ClickTemplateConfig] = None,
+    ):
+        self.click_k = click_k
+        self.merge_gap = merge_gap
+        self.min_click_count = min_click_count
+        self.warn_max_fraction = warn_max_fraction
+        self.fault_max_fraction = fault_max_fraction
+        self.snippet_ms = snippet_ms
+        self._template_config = (
+            template_config if template_config is not None else load_click_template()
+        )
+
+    def run(self, window: AudioWindow, features: dict[str, Any]) -> SignalCheckResult:
+        x = window.samples.astype(np.float64)
+        d = np.diff(x)
+        if d.size == 0 or not self._template_config.enabled:
+            return SignalCheckResult(
+                check_id=self.check_id,
+                check_name=self.check_name,
+                status=CheckStatus.PASS,
+                measurements=[],
+                diagnostic_messages=[],
+            )
+
+        sigma = 1.4826 * float(np.median(np.abs(d - np.median(d))))
+
+        # A flat/silent signal has zero variation in its first difference; that's
+        # Flatline's job, not this check's (same guard as T009).
+        if sigma <= 0:
+            return SignalCheckResult(
+                check_id=self.check_id,
+                check_name=self.check_name,
+                status=CheckStatus.PASS,
+                measurements=[],
+                diagnostic_messages=[],
+            )
+
+        click_mask = np.abs(d) > self.click_k * sigma
+        idxs = np.where(click_mask)[0]
+
+        if idxs.size == 0:
+            return SignalCheckResult(
+                check_id=self.check_id,
+                check_name=self.check_name,
+                status=CheckStatus.PASS,
+                measurements=[Measurement("click_count", 0.0)],
+                diagnostic_messages=[],
+            )
+
+        gaps = np.diff(idxs)
+        group_starts = np.where(np.concatenate(([True], gaps > self.merge_gap)))[0]
+        group_bounds = list(zip(group_starts, list(group_starts[1:]) + [len(idxs)]))
+
+        template = self._template_config.template
+        threshold = self._template_config.match_threshold
+        sr = window.sample_rate
+        n_bins = self._template_config.n_bins
+        freq_max = self._template_config.freq_max_hz
+
+        click_count = 0
+        matched_count = 0
+        for gs, ge in group_bounds:
+            members = idxs[gs:ge]
+            peak_idx = int(members[np.argmax(np.abs(d[members]))])
+            click_count += 1
+            spec = _click_spectrum(x, peak_idx, sr, self.snippet_ms, n_bins, freq_max)
+            if spec is not None and float(np.dot(spec, template)) >= threshold:
+                matched_count += 1
+
+        measurements = [
+            Measurement("click_count", float(click_count)),
+            Measurement("matched_click_count", float(matched_count)),
+        ]
+
+        diagnostics: list[str] = []
+        if click_count < self.min_click_count:
+            status = CheckStatus.PASS
+        else:
+            match_fraction = matched_count / click_count
+            measurements.append(Measurement("match_fraction", match_fraction))
+            if match_fraction <= self.fault_max_fraction:
+                status = CheckStatus.FAIL
+                diagnostics.append(
+                    f"Click spectral match: {matched_count}/{click_count} clicks "
+                    f"({match_fraction:.0%}) look bite-like -- predominantly non-bite "
+                    "clicking, consistent with sensor/cable contact noise"
+                )
+            elif match_fraction <= self.warn_max_fraction:
+                status = CheckStatus.WARNING
+                diagnostics.append(
+                    f"Click spectral match: {matched_count}/{click_count} clicks "
+                    f"({match_fraction:.0%}) look bite-like -- mixed/ambiguous"
+                )
+            else:
+                status = CheckStatus.PASS
+
+        return SignalCheckResult(
+            check_id=self.check_id,
+            check_name=self.check_name,
+            status=status,
+            measurements=measurements,
             diagnostic_messages=diagnostics,
         )

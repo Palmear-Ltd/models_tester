@@ -23,6 +23,7 @@ from app.health.checks.frequency_domain import (
     SpectralShapeCheck,
 )
 from app.health.checks.time_domain import (
+    ClickSpectralMatchCheck,
     ClickTransientCheck,
     ClippingCheck,
     CrestFactorCheck,
@@ -65,6 +66,7 @@ REGISTRY: list[CheckSpec] = [
     CheckSpec("T007", ZeroCrossingRateCheck, "time_domain"),
     CheckSpec("T008", DropoutSegmentCheck, "time_domain"),
     CheckSpec("T009", ClickTransientCheck, "time_domain"),
+    CheckSpec("T010", ClickSpectralMatchCheck, "time_domain"),
     CheckSpec("F001", SpectralShapeCheck, "frequency_domain"),
     CheckSpec("F002", SpectralFlatnessCheck, "frequency_domain"),
     CheckSpec("F003", BandEnergyDistributionCheck, "frequency_domain"),
@@ -118,6 +120,10 @@ DEFAULT_CHECK_THRESHOLDS_PATH = os.path.join(
 
 _SHIPPED_CHECK_THRESHOLD_DEFAULTS: dict[str, dict] = {
     "T009": {"warn_count": 15, "fault_count": 30},
+    # Fit 2026-08-09 (fit_click_template.py's replay against the same local corpora as
+    # T009/rootcause's 2026-07-16/2026-07-30 recalibrations) -- see
+    # ClickSpectralMatchCheck's docstring for what these mean.
+    "T010": {"min_click_count": 5, "warn_max_fraction": 0.5, "fault_max_fraction": 0.2},
 }
 
 

@@ -33,6 +33,17 @@ produce a result. When present they may only append a qualifying sentence to
 ``explanation`` -- they never change ``primary_cause`` or ``confidence``.
 This mirrors the established idiom in ``anomaly.py`` / ``calibration_eval.py``:
 optional, additive, never state-changing.
+
+T010 (``ClickSpectralMatchCheck``, added 2026-08-09) refines the click-based signal
+in ``_WEIGHT_TABLE`` below with a locally-fit spectral template that separates real
+bite-click activity from confirmed SENSOR_LINK contact-noise clicking -- see
+``_WEIGHT_TABLE``'s own comment for the validated numbers and
+docs/superpowers/specs/2026-08-09-rootcause-click-template-refinement-design.md for
+the full evidence. Its validated scope is narrow: confirmed SENSOR_LINK faults only,
+NOT a general false-positive explainer -- it barely beats chance against the broader,
+heterogeneous population of model-flagged-but-unconfirmed FPs (see that spec's
+non-goals). Treat a T010-driven SENSOR_LINK verdict with the same narrow reading as
+everything else this module reports.
 """
 from __future__ import annotations
 
@@ -62,8 +73,8 @@ class RootCauseAssessment:
 # Heuristic normalizer only -- NOT a probability. Equal to the sum of every
 # weight below, i.e. the highest score a single window can produce if every
 # contributing check fires at once: T001 FAIL (4) + T008 FAIL (3) +
-# T009 FAIL (2) + S004 WARNING (1) = 10.
-MAX_SCORE = 10.0
+# T009 FAIL (2) + T010 FAIL (2) + S004 WARNING (1) = 12.
+MAX_SCORE = 12.0
 
 # Static per-(check_id, status) weight table: only checks that indicate a
 # broken/intermittent sensor-to-jack link. Each entry maps to (weight, short
@@ -75,12 +86,27 @@ MAX_SCORE = 10.0
 # spectral drift, general microphone aging. Including them here would
 # resurface the confusing cable/mic/environment guessing this module
 # deliberately dropped.
+#
+# T010 (added 2026-08-09, docs/superpowers/specs/
+# 2026-08-09-rootcause-click-template-refinement-design.md) refines T009's raw click
+# *count* signal with a locally-fit differential spectral template: it only fires
+# WARNING/FAIL when a window's clicking looks predominantly NON-bite-like (low
+# match_fraction -- see ClickSpectralMatchCheck), which real-windowing validation found
+# separates confirmed SENSOR_LINK faults from genuine high-activity infestation sessions
+# much better than raw click count alone (T-vs-FAULT-gold AUC 0.85 by match_fraction vs.
+# 0.61 by raw click count -- see fit_click_template.py's decision-gate output). T010's
+# weight was set EQUAL to T009's (not larger) -- the corpus replay (see
+# DEFAULT_SESSION_CUTOFF's comment below) found T009+T010 combined, at these weights,
+# already met the acceptance bar without needing to shrink T009's own weight, so T009 was
+# left untouched rather than speculatively reduced.
 _WEIGHT_TABLE: dict = {
     ("T001", CheckStatus.FAIL): (4.0, "there was a complete loss of signal (flatline)"),
     ("T008", CheckStatus.WARNING): (2.0, "a brief dropout occurred mid-recording"),
     ("T008", CheckStatus.FAIL): (3.0, "frequent dropouts occurred during the recording"),
     ("T009", CheckStatus.WARNING): (1.0, "occasional clicking was detected, consistent with an intermittent connection"),
     ("T009", CheckStatus.FAIL): (2.0, "frequent clicking/crackling was detected, consistent with an intermittent or damaged connection"),
+    ("T010", CheckStatus.WARNING): (1.0, "some clicking did not clearly match the spectral pattern of a real bite click, consistent with sensor/cable contact noise"),
+    ("T010", CheckStatus.FAIL): (2.0, "most clicking did not match the spectral pattern of a real bite click, consistent with sensor/cable contact noise"),
     ("S004", CheckStatus.WARNING): (1.0, "the same dropout pattern recurred across several consecutive recordings, not just a one-off glitch"),
 }
 
@@ -128,7 +154,26 @@ _WEIGHT_TABLE: dict = {
 # correctly resolving SENSOR_LINK (comfortably above the "mostly" >= 4/8 test
 # bar) and 4/4 clean recordings NOT resolving SENSOR_LINK. Informal, not a
 # statistically rigorous cutoff -- same caveat as the 0.55 value it replaces.
-DEFAULT_SESSION_CUTOFF = 0.25
+#
+# REFIT 2026-08-09 (T010 added to the weight table above, see its comment): replayed the
+# *combined* T009+T010 weight table through the exact same production pipeline over the
+# same two corpora (test_data/F TN x4, test_data/audio_signal_health/fp/F FAULT x8; see
+# fit_click_template.py / docs/superpowers/plans/
+# 2026-08-09-rootcause-click-template-refinement.md step 4). Adding T010 raises every
+# session's mean score (it can only add weight, never subtract), so the old 0.25 cutoff
+# had to move too -- re-sorting the 12 combined-table mean scores: clean-side max is now
+# 0.6667 (one of the 4 TN files -- the same file that was already the noisiest of the four
+# under the old table) and fault-side 5th-lowest is 0.9722, a comfortably wide gap. 0.75
+# sits in that gap, biased toward the clean side for the same reason as the 2026-07-30
+# refit (avoid over-firing). Result: FAULT-gold still resolves SENSOR_LINK on 5/8
+# recordings (not regressed) and TN clean reference resolves NONE/UNKNOWN on 4/4 (improved
+# from the previous table+cutoff, where the noisy TN file sat right at the edge). A 40-file
+# sample of FP-silver (model-flagged-but-unconfirmed FPs, see the design spec's non-goals)
+# saw its aggregate SENSOR_LINK rate DROP from 50% (old table/cutoff) to 25% (new) --
+# informative, not a formal test, but the opposite of the "do not let this rise" risk the
+# design spec flagged. Still informal, not statistically rigorous -- same caveat as every
+# cutoff this module has shipped.
+DEFAULT_SESSION_CUTOFF = 0.75
 
 DEFAULT_SESSION_CONFIG_PATH = os.path.join(
     os.path.dirname(__file__), "rootcause_session_config.json"

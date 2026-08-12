@@ -80,6 +80,32 @@ def test_s004_warning_alone_is_sensor_link():
     assert "S004" in outcome.contributing_check_ids
 
 
+def test_t010_warning_alone_is_sensor_link():
+    results = [_result("T010", CheckStatus.WARNING)]
+    outcome = assess_results(results)
+    assert outcome.primary_cause is RootCause.SENSOR_LINK
+    assert "T010" in outcome.contributing_check_ids
+
+
+def test_t010_fail_alone_is_sensor_link():
+    results = [_result("T010", CheckStatus.FAIL)]
+    outcome = assess_results(results)
+    assert outcome.primary_cause is RootCause.SENSOR_LINK
+    assert "T010" in outcome.contributing_check_ids
+
+
+def test_t009_and_t010_fail_is_additive():
+    # T009 FAIL (2.0) + T010 FAIL (2.0) -- combined score/confidence must exceed either
+    # alone, same additive convention as test_t008_fail_plus_t009_fail_is_additive.
+    t009_alone = assess_results([_result("T009", CheckStatus.FAIL)])
+    combined = assess_results(
+        [_result("T009", CheckStatus.FAIL), _result("T010", CheckStatus.FAIL)]
+    )
+    assert combined.primary_cause is RootCause.SENSOR_LINK
+    assert combined.confidence > t009_alone.confidence
+    assert set(combined.contributing_check_ids) == {"T009", "T010"}
+
+
 def test_checks_unrelated_to_sensor_link_do_not_contribute():
     # T002 (energy), T004 (clipping), T006 (DC offset), F004 (hum), S002/S003
     # (spectral drift/noise floor) are about loudness/environment/general
@@ -268,11 +294,12 @@ def test_assess_many_occasional_isolated_warning_is_not_sensor_link():
 
 
 def test_assess_many_persistent_fault_pattern_is_sensor_link():
-    # A T009 WARNING recurring across most of the session -- a persistent
-    # pattern, not a one-off blip. mean_score = 30*1.0/40 = 0.75, clearly over
-    # the default cutoff (0.25 -- see DEFAULT_SESSION_CUTOFF's docstring).
-    session = [_healthy_window() for _ in range(10)] + [
-        _isolated_warning_window() for _ in range(30)
+    # A T009 WARNING recurring across nearly the whole session -- a persistent
+    # pattern, not a one-off blip. mean_score = 36*1.0/40 = 0.9, clearly over
+    # the default cutoff (0.75, refit 2026-08-09 when T010 joined the weight
+    # table -- see DEFAULT_SESSION_CUTOFF's docstring).
+    session = [_healthy_window() for _ in range(4)] + [
+        _isolated_warning_window() for _ in range(36)
     ]
     outcome = assess_many(session)
     assert outcome.primary_cause is RootCause.SENSOR_LINK
@@ -287,9 +314,11 @@ def test_assess_many_confidence_scales_with_persistence_within_fixed_session():
     # compared sessions of DIFFERENT total length holding the per-window
     # pattern fixed -- i.e. it was asserting the raw-sum saturation bug on
     # purpose. Rate within a fixed-length session is the correct axis.)
+    # high_rate needs mean_score > 0.75 (2026-08-09 cutoff) with only T009
+    # WARNING (weight 1.0) firing -- 8/10 windows clears it (mean 0.8).
     mostly_healthy = [_healthy_window() for _ in range(9)] + [_isolated_warning_window()]
-    mostly_faulty = [_healthy_window() for _ in range(3)] + [
-        _isolated_warning_window() for _ in range(7)
+    mostly_faulty = [_healthy_window() for _ in range(2)] + [
+        _isolated_warning_window() for _ in range(8)
     ]
     low_rate = assess_many(mostly_healthy)
     high_rate = assess_many(mostly_faulty)

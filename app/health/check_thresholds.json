@@ -2,5 +2,10 @@
   "T009": {
     "warn_count": 15,
     "fault_count": 30
+  },
+  "T010": {
+    "min_click_count": 5,
+    "warn_max_fraction": 0.5,
+    "fault_max_fraction": 0.2
   }
 }
