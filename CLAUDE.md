@@ -47,9 +47,12 @@ Both were built by two agents working the fully-written specs/plans end to end (
 
 ## Environment & testing
 
-- **`.venv` is Python 3.13 with only `numpy` + `pytest` installed.** That's enough for everything in `app/health/` and all tests. The **GUI** (`launcher.py`) and any tflite/audio work need the full `requirements.txt` (tensorflow/librosa/tkinter/sounddevice) installed first — so manual GUI checks are the **owner's** job; Claude verifies headless.
-- Run tests: `.venv/bin/python -m pytest tests/ -q`
-- UI changes Claude can verify headless: `.venv/bin/python -c "import ast; ast.parse(open('main.py').read())"` then `.venv/bin/python -c "import main"`, plus the unchanged test count.
+- **This repo has NO `.venv` of its own.** It uses the workspace-wide environment at `../.venv` (i.e. `/home/bashar/workspace/palmear/.venv`) — CPython 3.12.14, holding the full `requirements.txt` + `requirements-dev.txt` stack (librosa, scipy, sklearn, matplotlib, tkinter, pytest) with **tensorflow 2.21.0 as a CUDA build** (the `nvidia-*-cu12` wheels are installed alongside, so training runs on the GPU) — note this is one minor ahead of the `tensorflow==2.20.0` pin in `requirements.txt`; the pin was left as is for the team. See the root `../CLAUDE.md` for the shared-env rules; the key one: **new deps go into `requirements.txt` first, then install from the file** — never ad hoc, since this repo is shared with the team.
+- Run tests: `../.venv/bin/python -m pytest tests/ -q`
+- **Full green on Linux/3.12 is `351 passed, 2 skipped`** (verified 2026-09-04). The 2 skips are expected and are *not* environment faults — they need gitignored dev artifacts that aren't in a clean checkout: `tests/decision/test_rms_confidence.py` wants `manifest.csv` (produced by `offline_score.py`), and `tests/health/test_rootcause.py` wants the fp/F fault corpus. (The older "259 tests" / "349 tests" figures elsewhere in this file are historical counts from when those features landed.)
+- `sounddevice` needs the PortAudio **system** library (`sudo apt install portaudio19-dev`), not just the pip wheel. Without it `import sounddevice` — and therefore `import main` — raises `OSError: PortAudio library not found` and 3 test files fail to collect. Installed here on 2026-09-04.
+- The GUI (`launcher.py`) needs PortAudio plus a working display; manual GUI checks stay the **owner's** job. Claude verifies headless.
+- UI changes Claude can verify headless: `../.venv/bin/python -c "import ast; ast.parse(open('main.py').read())"` then `../.venv/bin/python -c "import main"`, plus the unchanged test count. Both work now that PortAudio is installed.
 
 ## Gotchas
 
@@ -61,4 +64,6 @@ Both were built by two agents working the fully-written specs/plans end to end (
 
 ## Persistent memory
 
-Project memory lives at `~/.claude/projects/-Users-bashar-workspace-palmear-models-tester/memory/` (index `MEMORY.md`). The phase log there is the fastest way to reload context — start there.
+Project memory now lives at `~/.claude/projects/-home-bashar-workspace-palmear/memory/` (index `MEMORY.md`), shared across the whole workspace.
+
+**The old macOS memory did not survive the move.** The previously-referenced `~/.claude/projects/-Users-bashar-workspace-palmear-models-tester/memory/` — and the `audio-health-monitoring-phases.md` phase log it held — do not exist on this machine. Don't go looking. The history of record is `docs/superpowers/{specs,plans}/`, `CHANGELOG.md`, and `git log`; the Status section above is the condensed version.
