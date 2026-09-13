@@ -4,6 +4,21 @@ Notable changes to the Palmear Audio Testing Tool. Dates are when the work lande
 `main`. This project doesn't use version numbers yet, so entries are grouped by date.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 2026-09-13 — 9_1_5 candidate model (thin-cable retrain)
+
+Added `models/9_1_5/` — a candidate retrain for the new thin piezo→preamp cable,
+selectable in the tester's model dropdown next to 9_1_2. Trained in the sibling
+`training/9_1_5/` project (app-parity features, 2025–2026 field data plus the
+Aug/Sep 2026 cable/housing sessions; full write-up and every number in that
+project's `README.md`). Ships with its own refit `scaler.json`, an EWMA-peak
+`decision_threshold.json` (span 8, cutoff 0.50 — the owner's choice, not the
+val-fitted 0.742) and `model_params.json` with `labelScore` refit to 0.17. No
+`rms_confidence.json` / `calibration.json` yet, so the tester logs the
+shipped-default fallback for those. Session-level on the 9_1_5 test split it
+runs FNR 0.158 / FPR 0.188 (bal. acc 0.827, AUC 0.902) against 9_1_2's
+0.115 / 0.336 (0.774, 0.865) at 9_1_2's shipped cutoff. See
+`models/9_1_5/README.md` for the known soft spot.
+
 ## 2026-08-12 — RMS verdict confidence + refined sensor-link click detection
 
 Both features grew out of a corpus-wide investigation into whether signal properties

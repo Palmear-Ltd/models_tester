@@ -1,0 +1,22 @@
+{
+  "method": "ewma_peak",
+  "cutoff": 0.5,
+  "span": 8.0,
+  "fit": {
+    "split": "val",
+    "years": [
+      2025,
+      2026
+    ],
+    "n_sessions": 864,
+    "criterion": "youden_j",
+    "val_auc": 0.943110267362759,
+    "val_fnr": 0.2093023255813954,
+    "val_fpr": 0.04081632653061224,
+    "val_bal_acc": 0.8749406739439962,
+    "model": "runs/run3_s43/release/model.tflite",
+    "scaler": "scaler.json",
+    "val_fitted_cutoff": 0.7418144295113198,
+    "chosen": "cutoff 0.50 chosen by the owner on 2026-09-13 to match 9_1_2's miss rate at about half its FPR (see 9_1_5/README.md operating-point table); the val-fitted Youden cutoff was 0.742"
+  }
+}
