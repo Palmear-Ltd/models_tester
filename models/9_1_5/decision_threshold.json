@@ -10,13 +10,13 @@
     ],
     "n_sessions": 864,
     "criterion": "youden_j",
-    "val_auc": 0.943110267362759,
-    "val_fnr": 0.2093023255813954,
-    "val_fpr": 0.04081632653061224,
-    "val_bal_acc": 0.8749406739439962,
-    "model": "runs/run3_s43/release/model.tflite",
+    "val_auc": 0.9430575330907557,
+    "val_fnr": 0.1705426356589147,
+    "val_fpr": 0.07346938775510205,
+    "val_bal_acc": 0.8779939882929917,
+    "model": "runs/run4all_s43/release/model.tflite",
     "scaler": "scaler.json",
-    "val_fitted_cutoff": 0.7418144295113198,
-    "chosen": "cutoff 0.50 chosen by the owner on 2026-09-13 to match 9_1_2's miss rate at about half its FPR (see 9_1_5/README.md operating-point table); the val-fitted Youden cutoff was 0.742"
+    "val_fitted_cutoff": 0.709468522737744,
+    "chosen": "cutoff 0.50 carried over from the step-1 pick on the 2026-09-15 held-out trees (run4_s43; see 9_1_5/README.md 'Run 4'); the val-fitted Youden cutoff of this model was 0.709"
   }
 }

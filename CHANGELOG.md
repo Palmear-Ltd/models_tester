@@ -4,6 +4,18 @@ Notable changes to the Palmear Audio Testing Tool. Dates are when the work lande
 `main`. This project doesn't use version numbers yet, so entries are grouped by date.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 2026-09-16 — 9_1_5 second cut (retrained on the 2026-09-15 twin session)
+
+Replaced `models/9_1_5/` (model, scaler, thresholds) with `training/9_1_5/runs/run4all_s43/release/`.
+The 2026-09-15 field test (27 infested + 25 healthy trees, standard cable on 9_1_2
+vs thin cable on 9_1_5) showed the first cut missing 8/27 infested trees on the thin
+cable that 9_1_2 caught on the same recordings — a model × thin-cable effect, not a
+cable effect (`training/9_1_5/eval/field_20260915/`). The recipe was re-validated on a
+tree-level hold-out of that session (`run4_s43`: 1/11 held-out thin-cable infested
+trees missed vs 3/11) and then retrained with every tree in train. Operating point
+unchanged (EWMA span 8 / cutoff 0.50, `labelScore` 0.17). Test-split numbers in
+`models/9_1_5/README.md`.
+
 ## 2026-09-13 — 9_1_5 candidate model (thin-cable retrain)
 
 Added `models/9_1_5/` — a candidate retrain for the new thin piezo→preamp cable,
