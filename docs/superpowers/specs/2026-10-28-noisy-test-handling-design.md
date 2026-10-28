@@ -137,3 +137,37 @@ Fitting is done by **injection**: real car noise from the long recording, mixed 
 
 - More **long recordings (≥ 10 min) on healthy trees** near other roads, a water pump, an engine, and on windy days, with the same other app. These are cheap and needed for the fit's generality and for D2.
 - **Any long recording on an infested tree** in any noise, even a short drive from the farm, would let extension be measured directly instead of by stand-in.
+
+## Fit result, 2026-10-28: the level-based noise measure fails bar 1 (stopped for the owner)
+
+`scripts/noisy_test_injection.py` (`build`, `eval`). Cache: `../training/9_1_5/.noisy_test_cache/`.
+
+**Tracks:**
+- 62 infested and 90 healthy joined tracks: 4 consecutive 2026 recordings of the same session, 80 s each, from val, recent and test.
+- 51 infested and 9 healthy real long recordings from 2025-12 (60–120 s, possibly seen by 9_1_2).
+- Each track was mixed with 2 random stretches of the car recording at its recorded level.
+
+**1. Normal field recordings vary as much as a car does.** Within ordinary 2026 20 s recordings (456), the trimmed floor swings by a median of **11 dB** above the recording's 20th percentile (90th percentile: 21 dB), at every position in the 20 s. Mixed in at its recorded level, the car raises a typical recording's floor by only 0.4 dB (faint car) to 12 dB (loud car), yet scores still drop. Consequences:
+
+| Measure | Normal tests flagged | Car-affected tests flagged |
+|---|---|---|
+| Floor > reference + 6 dB, any hop (q 0.2) | 82% | ~95% |
+| Floor > reference + 15 dB, any hop | 33% | — (misses most masking) |
+| Floor > reference + 10 dB for ≥ 12 consecutive hops | 5% | 5–9% |
+| Absolute floor > −35 dBFS, any hop | 36% | — |
+
+The low-frequency share (< 300 Hz) does not separate either: normal hops span 0.02–0.99, car hops 0.24–0.37. **No setting meets bar 1 (≤ 5% of normal tests extended) while catching car-affected tests.**
+
+**2. The mechanism itself works, given a good detector.** These results use an *oracle* detector that knows the true car level (noisy = car above −45 dBFS) and the extend-40 s configuration. Joined 2026 tracks:
+
+| | Infested reported HEALTHY | Infested INFESTED | Infested TOO NOISY | Healthy false alarms |
+|---|---|---|---|---|
+| Today, clean | 6.5% | 93.5% | — | 27.8% |
+| Today, with cars | **21.8%** | 78.2% | — | 12.2% |
+| Oracle + extend 40 s | **10.5%** | 83.1% | 6.5% | 18.3% |
+
+So, with a good detector, misses are halved and false alarms stay below the clean rate (bar 3 met).
+
+On the 2025 long recordings, whose infested signal is weaker (today: 78% caught clean, **9%** with cars), extending recovers almost nothing: even the road's quiet moments mask them. Only a strict TOO NOISY protects those trees.
+
+**What this means:** the state machine (`app/decision/noisy_test.py`, 22 tests) is sound and ready. What is missing is a noise detector that tells car noise apart from the ordinary variation of field recordings. Level alone cannot do it. Options are for the owner (see the plan's RESUME block).

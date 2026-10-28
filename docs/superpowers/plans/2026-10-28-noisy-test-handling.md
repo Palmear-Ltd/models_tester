@@ -7,8 +7,13 @@ Python: `../.venv/bin/python`. Tests: `../.venv/bin/python -m pytest tests/ -q`.
 ## RESUME HERE
 Update this block at the end of each task: what is done, the commit, the test count, and the next task.
 
-- Task 0 (spec + plan) done: commits `1fb6a9d` (spec) and the plan commit.
-- Next: Task 1.
+- Task 0 (spec + plan) done: `1fb6a9d`, `2f604a3`.
+- **Task 1 done:** `app/decision/noisy_test.py` and `tests/decision/test_noisy_test.py` (22 tests); full suite 373 passed, 2 skipped.
+- **Task 3 run early, and it FAILED bar 1. Stopped for the owner**, per this plan. See the spec section "Fit result, 2026-10-28". In short, a trimmed-floor level detector cannot tell car noise from the normal 11 dB variation of field recordings. With an oracle detector, extend 40 s halves the misses (21.8% → 10.5%).
+- Tasks 2 and 4–6 are **not started**. The owner chooses the next step:
+  - (a) a learned spectral car detector, fitted by injection (needs more noise recordings to avoid fitting one road);
+  - (b) ship the mechanism with the detector off, i.e. the plumbing for the app, the detector later;
+  - (c) another detection idea.
 
 ## Task 1 — Portable core `app/decision/noisy_test.py` (TDD)
 
