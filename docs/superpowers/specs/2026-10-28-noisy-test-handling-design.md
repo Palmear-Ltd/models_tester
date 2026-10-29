@@ -197,3 +197,19 @@ The owner restated the goal: **reduce false positives** without losing infested 
 - Cost at +10 dB / extend 40 s: 53% of healthy tests extend, mean length 26 s, 10% go past 40 s. At +8 dB: 67% extend, mean 31 s.
 - Absolute thresholds flag infested tests more often (infested backgrounds are louder) and lose catches: rejected.
 - **Conclusion:** noisy-window exclusion cuts false alarms by about 2–5 points out of about 24 (roughly 1 in 10 to 1 in 5), with no loss of catches at +8 to +10 dB. Most false alarms happen in quiet windows, so this feature is a small lever on false positives, not the main one.
+
+## Shipped configuration and road replay, 2026-10-29
+
+`models/9_1_2/noisy_test.json`: `enabled: false`, relative `noise_db = 10`, reference quantile 0.2, trim 90, no absolute threshold, `max_extra_sec = 40`, `max_attempts = 1`. This setting was chosen from the false-alarm simulation above.
+
+Replay of the 43-minute Musa roadside recording (healthy tree, cars throughout) with `offline_score.py --noisy-test`, as back-to-back tests:
+
+| Setting | Tests | Final verdicts | Extended | Mean test length |
+|---|---|---|---|---|
+| warn only (0 s, 1 attempt) | 130 | 117 TOO NOISY, 13 HEALTHY | 0% | 20 s |
+| repeat 2 (0 s) | 61 | 53 TOO NOISY, 8 HEALTHY | 0% (98% repeated) | 40 s |
+| extend 20 s | 82 | 70 HEALTHY, 12 TOO NOISY | 91% | 32 s |
+| extend 20 s + repeat 2 | 71 | 71 HEALTHY | 90% (15% repeated) | 36 s |
+| **extend 40 s (shipped)** | 80 | 79 HEALTHY, 1 TOO NOISY | 91% | 32 s |
+
+On a busy road almost every test extends, by about 12 s on average. Without extension almost every test is TOO NOISY. Today's rule gave no false alarm on this recording either, so this replay checks behaviour and length, not accuracy.
