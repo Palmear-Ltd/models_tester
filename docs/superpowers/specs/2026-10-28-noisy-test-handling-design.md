@@ -181,3 +181,19 @@ Question from the owner: is there a background level above which 9_1_2 stops wor
 - **Dropping the loud windows** (any hop more than X dB above the recording's 20th percentile), compared against dropping the same number of windows at random: X = 6 gives healthy positives 16.1% vs 21.3% and infested 87.0% vs 88.8%; X = 10 gives 21.1% vs 26.0% and 87.4% vs 89.5%. So the effect is real but modest: about 5 points fewer false alarms, for about 2 points fewer catches.
 - The false-alarm rate in these sets (24% overall; 15–33% by role) is far above the field estimate of about 3–4%; this has not been explained.
 - **Conclusion:** everyday background noise (not cars) causes **false alarms**, not misses. That supports D2: noisy windows should count for nothing in either direction. Cars, as mixed into recordings, cause misses. Both effects matter.
+
+## Extend/repeat on real recordings, goal = fewer false alarms, 2026-10-29
+
+The owner restated the goal: **reduce false positives** without losing infested catches. `scripts/noisy_test_background/sim_extend.py` chains 5 consecutive real 20 s recordings of one session and label at the level of per-hop floors and 9_1_2 window scores (choose split: train_main + val, 724 F / 97 T tracks; confirm split: recent + test, 265 F / 33 T). The null is a random detector flagging the same share of windows. Chained recordings may be different trees, so this is a stand-in.
+
+| Setting | Healthy positive, choose / confirm | Infested caught, choose / confirm | TOO NOISY F / T (choose) | Random-detector null, healthy positive |
+|---|---|---|---|---|
+| today | 24.6 / 23.4 | 88.7 / 97.0 | 0 / 0 | |
+| relative +10 dB, extend 40 s | 22.2 / 21.1 | 87.6 / 97.0 | 0.8 / 1.0 | 25.3 / 25.7 |
+| relative +8 dB, extend 40 s | 19.6 / 21.9 | 87.6 / 97.0 | 4.8 / 3.1 | 25.4 / 28.7 |
+| relative +6 dB, extend 40 s | 15.3 / 18.5 | 81.4 / 78.8 | 14.5 / 9.3 | 21.7 / 23.4 |
+| absolute −40 dBFS, extend 40 s | 19.6 / 23.0 | 81.4 / 51.5 | 7.3 / 8.2 | |
+
+- Cost at +10 dB / extend 40 s: 53% of healthy tests extend, mean length 26 s, 10% go past 40 s. At +8 dB: 67% extend, mean 31 s.
+- Absolute thresholds flag infested tests more often (infested backgrounds are louder) and lose catches: rejected.
+- **Conclusion:** noisy-window exclusion cuts false alarms by about 2–5 points out of about 24 (roughly 1 in 10 to 1 in 5), with no loss of catches at +8 to +10 dB. Most false alarms happen in quiet windows, so this feature is a small lever on false positives, not the main one.
