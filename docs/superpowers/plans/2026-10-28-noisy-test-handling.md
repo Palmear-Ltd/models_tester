@@ -7,13 +7,10 @@ Python: `../.venv/bin/python`. Tests: `../.venv/bin/python -m pytest tests/ -q`.
 ## RESUME HERE
 Update this block at the end of each task: what is done, the commit, the test count, and the next task.
 
-- Task 0 (spec + plan) done: `1fb6a9d`, `2f604a3`.
-- **Task 1 done:** `app/decision/noisy_test.py` and `tests/decision/test_noisy_test.py` (22 tests); full suite 373 passed, 2 skipped.
-- **Task 3 run early, and it FAILED bar 1. Stopped for the owner**, per this plan. See the spec section "Fit result, 2026-10-28". In short, a trimmed-floor level detector cannot tell car noise from the normal 11 dB variation of field recordings. With an oracle detector, extend 40 s halves the misses (21.8% → 10.5%).
-- Tasks 2 and 4–6 are **not started**. The owner chooses the next step:
-  - (a) a learned spectral car detector, fitted by injection (needs more noise recordings to avoid fitting one road);
-  - (b) ship the mechanism with the detector off, i.e. the plumbing for the app, the detector later;
-  - (c) another detection idea.
+- **ALL TASKS DONE (2026-10-29).** Full suite: 402 passed, 2 skipped.
+- Bar 1 as first written ("flag at most 5% of normal tests") was the wrong bar. The owner restated the goal as fewer false positives. Real-recording evidence (commits `cbe2ece`, `5443106`) chose relative +10 dB with extend 40 s: false alarms −2 to −3 points out of about 24, catches unchanged.
+- Task 2 `dcfe842` (fitted config, off; 17 golden vectors) · Task 4 `817dac7` (tester wiring, `_NZ`, full-length WAV save) · Task 5 `b76cc4f` (`offline_score.py --noisy-test`, road replay) · Task 6: handover `docs/noisy-test/handover-mobile.md`, CLAUDE.md.
+- Waiting on the owner: GUI check, push/merge, enabling it, the phone parity answer (D3: 36 windows from the first full buffer?). Next work: the window-rules study (`training/window_pool_1/docs/superpowers/specs/2026-10-28-window-rules-study.md`).
 
 ## Task 1 — Portable core `app/decision/noisy_test.py` (TDD)
 
