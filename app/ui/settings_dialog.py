@@ -21,7 +21,7 @@ class SettingsDialog:
         app = self.app
         self.window = tk.Toplevel(app.root)
         self.window.title("Settings")
-        self.window.geometry("480x420")
+        self.window.geometry("520x600")
         self.window.transient(app.root)
         self.window.grab_set()
 
@@ -102,6 +102,27 @@ class SettingsDialog:
         ttk.Spinbox(
             tab, from_=1.0, to=300.0, increment=1.0, textvariable=app.sliding_test_duration_var, width=12
         ).grid(row=5, column=1, sticky="w", padx=5)
+
+        # Noisy test handling (app/decision/noisy_test.py). Off by default; when on, the
+        # test ends once it has 36 quiet windows, so the duration above no longer applies.
+        if not hasattr(app, "noisy_enabled_var"):
+            return
+        ttk.Separator(tab).grid(row=6, column=0, columnspan=3, sticky="ew", pady=8)
+        ttk.Checkbutton(
+            tab, text="Noisy test handling (extend / repeat / TOO NOISY)", variable=app.noisy_enabled_var
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=5)
+        ttk.Label(tab, text="Max extension (sec):").grid(row=8, column=0, sticky="w", pady=5)
+        ttk.Spinbox(
+            tab, from_=0.0, to=120.0, increment=5.0, textvariable=app.noisy_max_extra_var, width=12
+        ).grid(row=8, column=1, sticky="w", padx=5)
+        ttk.Label(tab, text="Max attempts:").grid(row=9, column=0, sticky="w", pady=5)
+        ttk.Spinbox(
+            tab, from_=1, to=5, increment=1, textvariable=app.noisy_max_attempts_var, width=12
+        ).grid(row=9, column=1, sticky="w", padx=5)
+        ttk.Label(tab, text="Pause between attempts (sec):").grid(row=10, column=0, sticky="w", pady=5)
+        ttk.Spinbox(
+            tab, from_=0.0, to=10.0, increment=0.5, textvariable=app.noisy_pause_var, width=12
+        ).grid(row=10, column=1, sticky="w", padx=5)
 
     def _build_preprocessing_tab(self, notebook):
         app = self.app

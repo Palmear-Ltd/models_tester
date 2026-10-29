@@ -41,6 +41,12 @@ on the (zero-padded-or-truncated) first --max-duration-sec of audio, yielding ex
 score. Applying the sliding-window loop to a one-shot model would feed it a 2.5s buffer
 padded out to its full seq_len, which is not what a live single-shot session ever does.
 
+Noisy test replay (--noisy-test CONFIG, spec docs/superpowers/specs/2026-10-28-noisy-test-
+handling-design.md): scores each WAV with NO duration cap, then runs back-to-back noisy tests
+over it through app.decision.noisy_test.NoisyTestSession, exactly as main.py does live
+(extend, repeat after a pause, the next attempt continuing from where the audio is), and
+writes one row per attempt to --noisy-out. The config's `enabled` flag is forced on.
+
 Ground truth is resolved from a `T`/`F` path component (see
 app.decision.manifest.resolve_label) — files with no such component, or an ambiguous
 `X_` filename prefix, are still scored but flagged for exclusion in the manifest rather
@@ -62,6 +68,7 @@ import soundfile as sf
 
 from app.audio.features import FeatureExtractor
 from app.audio.scaler import Scaler
+from app.decision.noisy_test import DONE, REPEAT, NoisyTestConfig, NoisyTestSession, hop_floor_db
 from app.decision.manifest import is_ambiguous_prefix, parse_recording_date, resolve_label, season_bucket
 from app.model.inference import ModelInference
 
@@ -87,6 +94,13 @@ DEFAULT_PREP_PARAMS = dict(
     sub_hop_size_sec=0.025,
     use_filter=False,
 )
+
+NOISY_FIELDS = [
+    "path", "label", "test", "attempt", "start_sec", "duration_sec", "verdict", "provisional_verdict",
+    "n_quiet", "n_windows", "quiet_peak", "all_peak", "complete",
+]
+# Effectively no cap: the noisy test decides when each test ends.
+NOISY_MAX_DURATION_SEC = 1e9
 
 MANIFEST_FIELDS = [
     "path",
@@ -280,8 +294,84 @@ def _read_cache(cache_path):
         return json.load(f)
 
 
+def hop_floors(audio, trim_percentile):
+    """Per-0.5 s-hop trimmed floors (dBFS) over whole blocks, as main.py feeds them."""
+    block = int(TARGET_SR * HOP_SEC)
+    return [hop_floor_db(audio[h * block:(h + 1) * block], trim_percentile) for h in range(len(audio) // block)]
+
+
+def noisy_replay(cfg, floors, scores):
+    """Back-to-back noisy tests over one recording, as main.py runs them live.
+
+    `floors[h]` is hop h's trimmed floor; `scores[j]` the window ending at hop j + 4 of a
+    continuous scoring (score_wav_file with no cap). A new attempt restarts the rolling
+    buffer, so its first window ends 4 hops after it starts -- which is exactly the window
+    the continuous scoring already holds for that hop, since a window is just the last
+    2.5 s of audio. After REPEAT, `repeat_pause_sec` of audio is skipped. A test cut short
+    by the end of the recording is closed with finish() and marked complete=False.
+    Returns one dict per attempt."""
+    k = cfg.hops_per_window - 1
+    pause = int(round(cfg.repeat_pause_sec / HOP_SEC))
+    n = len(floors)
+    rows, h0, test = [], 0, 0
+    while h0 < n:
+        test += 1
+        session = NoisyTestSession(cfg)
+        while h0 < n:
+            start, closed = h0, None
+            for h in range(start, n):
+                action = session.feed_floor(floors[h], scores[h - k] if h - start >= k else None)
+                if action.kind in (DONE, REPEAT):
+                    closed = action
+                    break
+            result = closed.result if closed else session.finish()
+            rows.append(dict(
+                test=test, attempt=result.attempt, start_sec=start * HOP_SEC, duration_sec=result.n_hops * HOP_SEC,
+                verdict=result.verdict, provisional_verdict=result.provisional_verdict, n_quiet=result.n_quiet,
+                n_windows=result.n_windows, quiet_peak=result.quiet_peak, all_peak=result.all_peak,
+                complete=closed is not None,
+            ))
+            if closed is None:
+                return rows
+            h0 = h + 1
+            if closed.kind == DONE:
+                break
+            h0 += pause
+            session.start_attempt()
+    return rows
+
+
+def run_noisy(args, manifest_rows):
+    """--noisy-test: replay every scored file through the noisy test; one row per attempt."""
+    with open(args.noisy_test, "r", encoding="utf-8") as f:
+        cfg = NoisyTestConfig.from_json(f.read())
+    overrides = {"enabled": True}
+    if args.noisy_max_extra_sec is not None:
+        overrides["max_extra_sec"] = args.noisy_max_extra_sec
+    if args.noisy_max_attempts is not None:
+        overrides["max_attempts"] = args.noisy_max_attempts
+    cfg = NoisyTestConfig.from_json(json.dumps(dict(json.loads(cfg.to_json()), **overrides)))
+    out = []
+    for row in manifest_rows:
+        cached = _read_cache(row["cache_path"])
+        if not cached:
+            continue
+        floors = hop_floors(_load_wav_mono(row["path"]), cfg.trim_percentile)
+        for r in noisy_replay(cfg, floors, cached["scores"]):
+            out.append(dict(path=row["path"], label=row["label"], **r))
+    with open(args.noisy_out, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=NOISY_FIELDS)
+        writer.writeheader()
+        writer.writerows(out)
+    print(f"Wrote noisy-test replay: {args.noisy_out} ({len(out)} attempts; noise_db={cfg.noise_db}, "
+          f"max_extra_sec={cfg.max_extra_sec}, max_attempts={cfg.max_attempts})")
+    return out
+
+
 def run(args):
     prep_params = dict(DEFAULT_PREP_PARAMS)
+    if getattr(args, "noisy_test", None):
+        args.max_duration_sec = NOISY_MAX_DURATION_SEC
     os.makedirs(args.cache_dir, exist_ok=True)
 
     all_wavs = []
@@ -370,6 +460,8 @@ def run(args):
         writer.writerows(manifest_rows)
 
     print(f"Wrote manifest: {args.manifest_out} ({len(manifest_rows)} rows)")
+    if getattr(args, "noisy_test", None):
+        return run_noisy(args, manifest_rows)
 
 
 def main():
@@ -401,6 +493,16 @@ def main():
         "cap (main.py's Sliding Test Duration setting). Change only if that setting "
         "changed -- the two must agree or the fitted cutoff will not transfer.",
     )
+    parser.add_argument(
+        "--noisy-test",
+        default=None,
+        metavar="CONFIG",
+        help="Replay each file through the noisy test (e.g. models/9_1_2/noisy_test.json, "
+        "switched on) with no duration cap; one row per attempt to --noisy-out.",
+    )
+    parser.add_argument("--noisy-out", default="noisy_test.csv")
+    parser.add_argument("--noisy-max-extra-sec", type=float, default=None, help="Override the config's max_extra_sec.")
+    parser.add_argument("--noisy-max-attempts", type=int, default=None, help="Override the config's max_attempts.")
     args = parser.parse_args()
     run(args)
 

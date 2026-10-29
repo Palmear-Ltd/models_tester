@@ -9,6 +9,7 @@ import queue
 import time
 import os
 import json
+import dataclasses
 import subprocess
 import platform
 from datetime import datetime
@@ -32,6 +33,10 @@ from app.ui import SettingsDialog
 from app.decision.threshold import EwmaPeakDecision, default_config as default_decision_config
 from app.decision import rms_confidence
 from app.decision.rms_confidence import default_config as default_rms_confidence_config
+from app.decision.noisy_test import (
+    DONE as NOISY_DONE, EXTENDING as NOISY_EXTENDING, INFESTED as NOISY_INFESTED, REPEAT as NOISY_REPEAT,
+    TOO_NOISY, NoisyTestSession, default_config as default_noisy_config,
+)
 
 SAMPLE_RATE = 44100  # acquisition sample rate (Hz); the whole pipeline runs at this rate
 VALIDATION_WINDOWS = 40  # ~20 s of validation at 0.5 s per window
@@ -48,6 +53,21 @@ def capture_duration_sec(inference_mode, single_shot_duration_sec, sliding_test_
     if inference_mode == "single":
         return single_shot_duration_sec
     return sliding_test_duration_sec
+
+
+def noisy_capture_max_chunks(cfg):
+    """Upper bound on 0.5 s chunks a noisy test can consume: every attempt runs to the end
+    of its extension, with a pause between attempts. The session ends the test earlier, on
+    DONE, so this is only the capture threads' safety cap."""
+    pause = int(round(cfg.repeat_pause_sec / 0.5))
+    return cfg.max_attempts * (cfg.normal_hops + cfg.extra_hops) + (cfg.max_attempts - 1) * pause
+
+
+def noisy_predicted_infested(result):
+    """`predicted_infested` for a noisy-test result (spec D5): the verdict, except that a
+    TOO_NOISY test keeps its provisional all-window verdict, as today's tester would say."""
+    verdict = result.provisional_verdict if result.verdict == TOO_NOISY else result.verdict
+    return verdict == NOISY_INFESTED
 
 # Try to import TFLite Interpreter
 try:
@@ -169,6 +189,23 @@ class ModelsTesterApp:
         self.rms_confidence_config = default_rms_confidence_config()
         self.verdict_confidence_probability = None
         self.verdict_confidence_tier = None
+
+        # Noisy test handling (app/decision/noisy_test.py, spec 2026-10-28): extend /
+        # repeat / TOO NOISY when the background is noisy. OFF by default. The detector
+        # settings come from models/<version>/noisy_test.json (load_resources); these
+        # variables are the tester's switches, persisted with the other settings.
+        self.noisy_file_config = default_noisy_config()
+        self.noisy_enabled_var = tk.BooleanVar(value=False)
+        self.noisy_max_extra_var = tk.DoubleVar(value=40.0)
+        self.noisy_max_attempts_var = tk.IntVar(value=1)
+        self.noisy_pause_var = tk.DoubleVar(value=3.0)
+        self.noisy_config = None        # effective config of the running test; None = feature off
+        self.noisy_session = None
+        self.noisy_attempts = []        # [{"result": AttemptResult, "saved": bool}] for this test
+        self._noisy_attempt_open = False
+        self._noisy_closed = False
+        self._noisy_pause_left = 0
+        self.test_audio_chunks = []     # every sliding-mode chunk of the current attempt, for saving
 
         self._setup_ui()
         self._load_settings()
@@ -577,7 +614,38 @@ class ModelsTesterApp:
                 f"{os.path.basename(os.path.dirname(model_path))}; trust tiers are approximate"
             )
 
+        # Noisy test detector settings (spec 2026-10-28). No file = thresholds infinite =
+        # nothing is ever noisy, even when switched on.
+        noisy_path = os.path.join(os.path.dirname(model_path), "noisy_test.json")
+        self.noisy_file_config = default_noisy_config(noisy_path)
+        self.log(
+            f"Noisy test: {'ON' if self.noisy_enabled_var.get() else 'off'} "
+            f"(noise_db={self.noisy_file_config.noise_db}, abs_noise_db={self.noisy_file_config.abs_noise_db}; "
+            f"{'fitted for this model' if os.path.isfile(noisy_path) else 'no noisy_test.json: never flags'})"
+        )
+
         return True
+
+    def _effective_noisy_config(self):
+        """The noisy-test config for the test about to start, or None when the feature is
+        off or cannot apply (single-shot, one-shot model, a window other than 2.5 s)."""
+        if not self.noisy_enabled_var.get():
+            return None
+        if self.inference_mode_var.get() == "single" or self.is_one_shot_model:
+            self.log("Noisy test: skipped (sliding-window mode only)")
+            return None
+        if abs(self.duration_var.get() - 2.5) > 1e-9:
+            self.log("Noisy test: skipped (needs the 2.5 s window it was fitted on)")
+            return None
+        return dataclasses.replace(
+            self.noisy_file_config,
+            enabled=True,
+            max_extra_sec=max(0.0, float(self.noisy_max_extra_var.get())),
+            max_attempts=max(1, int(self.noisy_max_attempts_var.get())),
+            repeat_pause_sec=max(0.0, float(self.noisy_pause_var.get())),
+            cutoff=self.decision_config.cutoff,
+            span=self.decision_config.span,
+        )
 
     def toggle_test(self):
         if self.is_running:
@@ -611,6 +679,13 @@ class ModelsTesterApp:
         self.collected_audio_chunks = []
         self.final_audio_clip = None
         self.single_shot_processed = False
+        self.test_audio_chunks = []
+        self.noisy_config = self._effective_noisy_config()
+        self.noisy_session = NoisyTestSession(self.noisy_config) if self.noisy_config else None
+        self.noisy_attempts = []
+        self._noisy_attempt_open = self.noisy_session is not None
+        self._noisy_closed = False
+        self._noisy_pause_left = 0
         
         self.start_btn.configure(text="STOP TEST")
         self.audio_queue = queue.Queue()
@@ -650,12 +725,31 @@ class ModelsTesterApp:
         self.start_btn.configure(text="START TEST")
         predicted_infested = self.calculate_diagnosis()
 
-        audio_path = None
-        if self.save_results_var.get():
-            if self.input_type_var.get() == "mic":
-                audio_path = self.save_audio_snapshot(predicted_infested)
-            self.save_results(predicted_infested, audio_path)
+        if self.noisy_session is not None:
+            # Earlier attempts were saved when they ended (REPEAT); save the last one
+            # unless the test was stopped during the pause after a saved attempt.
+            if self.noisy_attempts and not self.noisy_attempts[-1]["saved"]:
+                self._save_test(self.noisy_attempts[-1])
+        else:
+            self._save_test(None, predicted_infested)
         self.log("Test Stopped.")
+
+    def _save_test(self, attempt, predicted_infested=None):
+        """Saves the current attempt's WAV (mic input only) and JSON, if saving is on.
+        `attempt` is a noisy-test record, or None when the feature is off."""
+        if attempt is not None:
+            attempt["saved"] = True
+            result = attempt["result"]
+            predicted_infested = noisy_predicted_infested(result)
+            too_noisy = result.verdict == TOO_NOISY
+        else:
+            result, too_noisy = None, False
+        if not self.save_results_var.get():
+            return
+        audio_path = None
+        if self.input_type_var.get() == "mic":
+            audio_path = self.save_audio_snapshot(predicted_infested, too_noisy=too_noisy)
+        self.save_results(predicted_infested, audio_path, noisy_result=result)
         
     def calculate_diagnosis(self):
         if self.inference_mode_var.get() == "single":
@@ -673,6 +767,9 @@ class ModelsTesterApp:
         if self.decision_accumulator is None:
             self.diag_label.configure(text="NO RESULT", foreground="gray")
             return False
+
+        if getattr(self, "noisy_session", None) is not None:
+            return self._noisy_diagnosis()
 
         peak = self.decision_accumulator.peak
         state = self.decision_accumulator.state
@@ -699,6 +796,91 @@ class ModelsTesterApp:
         self.diag_label.configure(text=label_text, foreground=color)
         return predicted_infested
 
+    def _noisy_diagnosis(self):
+        """Verdict of a noisy test: the last attempt's result. An attempt still open (the
+        operator pressed stop, or a replayed file ran out) is closed as it stands."""
+        if self._noisy_attempt_open:
+            self.noisy_attempts.append({"result": self.noisy_session.finish(), "saved": False})
+            self._noisy_attempt_open = False
+        self._noisy_closed = True
+        if not self.noisy_attempts:
+            self.diag_label.configure(text="NO RESULT", foreground="gray")
+            return False
+        r = self.noisy_attempts[-1]["result"]
+        n_max = self.noisy_config.max_attempts
+        attempt_txt = f", attempt {r.attempt} of {n_max}" if n_max > 1 else ""
+        self.verdict_confidence_probability = None
+        self.verdict_confidence_tier = None
+        if r.verdict == TOO_NOISY:
+            self.diag_label.configure(
+                text=f"TOO NOISY — please test again ({r.n_quiet} of {self.noisy_config.min_quiet_windows} "
+                     f"quiet windows{attempt_txt}; without noise check: {r.provisional_verdict})",
+                foreground="orange",
+            )
+        else:
+            label_text = (f"{r.verdict} (EWMA peak: {r.quiet_peak:.3f} over {self.noisy_config.min_quiet_windows} "
+                          f"quiet windows, {r.n_hops * 0.5:.0f}s{attempt_txt})")
+            if self.energy_history:
+                rms_values = [v for _, v in self.energy_history]
+                probability, tier = rms_confidence.estimate(
+                    r.verdict, sum(rms_values) / len(rms_values), max(rms_values), self.rms_confidence_config
+                )
+                self.verdict_confidence_probability = probability
+                self.verdict_confidence_tier = tier
+                label_text += f" — verdict confidence: {tier}"
+            self.diag_label.configure(text=label_text, foreground="red" if r.verdict == NOISY_INFESTED else "green")
+        return noisy_predicted_infested(r)
+
+    def _feed_noisy(self, chunk_flat, score, window_ready):
+        """Passes one 0.5 s hop and its window score to the noisy-test session and acts on
+        the answer: keep going, extend, repeat after a pause, or finish the test."""
+        if window_ready and score is None:
+            self.log("Noisy test: inference failed on this window; counted as score 0")
+            score = 0.0
+        action = self.noisy_session.feed_hop(chunk_flat, score if window_ready else None)
+        cfg = self.noisy_config
+        if action.kind == NOISY_EXTENDING:
+            self.diag_label.configure(text="Noise detected — keeping the test running", foreground="orange")
+            self.log(f"Noisy test: {self.noisy_session.n_quiet()} quiet windows after 20 s; extending up to "
+                     f"{cfg.max_extra_sec:.0f}s")
+        elif action.kind == NOISY_REPEAT:
+            self.noisy_attempts.append({"result": action.result, "saved": False})
+            self._noisy_attempt_open = False
+            self._save_test(self.noisy_attempts[-1])
+            nxt = action.result.attempt + 1
+            self.diag_label.configure(
+                text=f"Too noisy — repeating test {nxt} of {cfg.max_attempts} in {cfg.repeat_pause_sec:.0f}s",
+                foreground="orange",
+            )
+            self.log(f"Noisy test: attempt {action.result.attempt} too noisy "
+                     f"({action.result.n_quiet} quiet windows); repeating")
+            self._noisy_pause_left = int(round(cfg.repeat_pause_sec / 0.5))
+            if self._noisy_pause_left == 0:
+                self._start_noisy_attempt()
+        elif action.kind == NOISY_DONE:
+            self.noisy_attempts.append({"result": action.result, "saved": False})
+            self._noisy_attempt_open = False
+            self._noisy_closed = True
+            self.is_running = False   # process_queue sees this and calls stop_test
+
+    def _start_noisy_attempt(self):
+        """A fresh attempt after REPEAT: new buffer, new accumulator, new per-attempt traces
+        (each attempt is saved as its own file)."""
+        self.noisy_session.start_attempt()
+        self._noisy_attempt_open = True
+        self.decision_accumulator = EwmaPeakDecision(self.decision_config)
+        self.session_buffer = np.zeros(int(44100 * self.duration_var.get()), dtype=np.float32)
+        self._session_samples_received = 0
+        self.test_audio_chunks = []
+        self.score_history = []
+        self.trigger_history = []
+        self.energy_history = []
+        self.ewma_history = []
+        self.diag_label.configure(
+            text=f"Testing... (attempt {self.noisy_session.attempt} of {self.noisy_config.max_attempts})",
+            foreground="blue",
+        )
+
     def mic_loop(self, device_idx):
         self.log(f"Starting Mic Stream on Device {device_idx}...")
 
@@ -712,6 +894,11 @@ class ModelsTesterApp:
         max_chunks = int(duration_sec / 0.5)
         mode_label = "Single-shot" if self.inference_mode_var.get() == "single" else "Sliding-window"
         self.log(f"{mode_label} mode: capturing {duration_sec}s")
+        noisy_config = getattr(self, "noisy_config", None)
+        if noisy_config is not None:
+            max_chunks = noisy_capture_max_chunks(noisy_config)
+            self.log(f"Noisy test ON: ends at {noisy_config.min_quiet_windows} quiet windows, "
+                     f"at most {max_chunks * 0.5:.0f}s")
         chunk_count = [0]
 
         def callback(indata, frames, time, status):
@@ -765,6 +952,12 @@ class ModelsTesterApp:
             self.log(f"{mode_label} mode: capturing {duration_sec}s")
 
             max_chunks = int(duration_sec / 0.5)
+            noisy_config = getattr(self, "noisy_config", None)
+            if noisy_config is not None:
+                # Same cap as mic_loop. A file that ends first ends the attempt as it stands.
+                max_chunks = noisy_capture_max_chunks(noisy_config)
+                self.log(f"Noisy test ON: ends at {noisy_config.min_quiet_windows} quiet windows, "
+                         f"at most {max_chunks * 0.5:.0f}s")
             # Whole blocks only. A short final block used to be zero-padded, and that
             # zero edge rolls through the session buffer and trips the click/dropout
             # checks (see rootcause.py's DEFAULT_SESSION_CUTOFF comment). The mic never
@@ -831,6 +1024,10 @@ class ModelsTesterApp:
             ("duration", self.duration_var),
             ("score_thresh", self.score_thresh_var),
             ("sliding_test_duration", self.sliding_test_duration_var),
+            ("noisy_test_enabled", self.noisy_enabled_var),
+            ("noisy_test_max_extra_sec", self.noisy_max_extra_var),
+            ("noisy_test_max_attempts", self.noisy_max_attempts_var),
+            ("noisy_test_repeat_pause_sec", self.noisy_pause_var),
         ]
 
     def _save_settings(self):
@@ -1116,6 +1313,16 @@ class ModelsTesterApp:
         self._update_health_panel(report, assessment)
 
     def handle_audio_chunk(self, chunk):
+        if self.noisy_session is not None:
+            if self._noisy_closed:
+                return  # the noisy test has finished; chunks still in flight are not part of it
+            if self._noisy_pause_left > 0:
+                # The pause between attempts: this audio belongs to no attempt.
+                self._noisy_pause_left -= 1
+                if self._noisy_pause_left == 0:
+                    self._start_noisy_attempt()
+                return
+
         # We need a persistent buffer for the session
         if not hasattr(self, 'session_buffer'):
             buffer_len = int(44100 * self.duration_var.get())
@@ -1164,9 +1371,13 @@ class ModelsTesterApp:
             self.energy_bar["value"] = min(rms * 100, 100)
             curr_time = time.time() - self.start_time
             self.energy_history.append((curr_time, rms))
-        elif buffer_full:
-            # Sliding-window behavior
-            self.run_inference(self.session_buffer)
+        else:
+            # Sliding-window behavior. Keep the whole attempt's audio: the WAV save used to
+            # write only the last 2.5 s rolling buffer.
+            self.test_audio_chunks.append(chunk_flat.copy())
+            score = self.run_inference(self.session_buffer) if buffer_full else None
+            if self.noisy_session is not None:
+                self._feed_noisy(chunk_flat, score, buffer_full)
 
     def run_single_shot_inference(self):
         if not self.collected_audio_chunks:
@@ -1186,7 +1397,7 @@ class ModelsTesterApp:
         self.run_inference(self.final_audio_clip)
         self.single_shot_processed = True
 
-    def _derive_output_base(self, predicted_infested):
+    def _derive_output_base(self, predicted_infested, too_noisy=False):
         user_choice = self.user_label_var.get()
         predicted_infested = bool(predicted_infested)
         if user_choice == "infested":
@@ -1198,16 +1409,25 @@ class ModelsTesterApp:
 
         out_dir = self.output_dir_var.get().strip() or "recordings"
         os.makedirs(out_dir, exist_ok=True)
+        # TOO NOISY tests get _NZ after the outcome letters (spec D5); the audio ingest
+        # still reads the label from the ^(TP|FN|TN|FP)_ prefix.
+        if too_noisy:
+            tag += "_NZ"
         base = os.path.join(out_dir, f"{tag}_{timestamp}")
         return base
 
-    def save_audio_snapshot(self, predicted_positive):
+    def save_audio_snapshot(self, predicted_positive, too_noisy=False):
         if not hasattr(self, 'session_buffer') and self.final_audio_clip is None:
             return None
         try:
-            base = self._derive_output_base(predicted_positive)
+            base = self._derive_output_base(predicted_positive, too_noisy=too_noisy)
             wav_path = f"{base}.wav"
-            audio_to_save = self.final_audio_clip if self.inference_mode_var.get() == "single" and self.final_audio_clip is not None else self.session_buffer
+            if self.inference_mode_var.get() == "single" and self.final_audio_clip is not None:
+                audio_to_save = self.final_audio_clip
+            elif self.test_audio_chunks:
+                audio_to_save = np.concatenate(self.test_audio_chunks)
+            else:
+                audio_to_save = self.session_buffer
             sf.write(wav_path, audio_to_save, 44100)
             self.log(f"Saved audio: {os.path.basename(wav_path)}")
             return wav_path
@@ -1215,9 +1435,19 @@ class ModelsTesterApp:
             self.log(f"Save audio error: {e}")
             return None
 
-    def save_results(self, predicted_infested, audio_path=None):
+    def save_results(self, predicted_infested, audio_path=None, noisy_result=None):
         try:
-            base = os.path.splitext(audio_path)[0] if audio_path else self._derive_output_base(predicted_infested)
+            too_noisy = noisy_result is not None and noisy_result.verdict == TOO_NOISY
+            base = (os.path.splitext(audio_path)[0] if audio_path
+                    else self._derive_output_base(predicted_infested, too_noisy=too_noisy))
+            if noisy_result is not None:
+                verdict = noisy_result.verdict
+            else:
+                verdict = "INFESTED" if predicted_infested else "HEALTHY"
+            if self.inference_mode_var.get() == "single" and self.final_audio_clip is not None:
+                actual_sec = len(self.final_audio_clip) / 44100
+            else:
+                actual_sec = sum(len(c) for c in self.test_audio_chunks) / 44100
 
             data = {
                 "timestamp": datetime.now().isoformat(),
@@ -1226,6 +1456,13 @@ class ModelsTesterApp:
                 "scaler_path": self.scaler_path_var.get(),
                 "user_label": self.user_label_var.get(),
                 "predicted_infested": bool(predicted_infested),
+                "verdict": verdict,
+                "duration_sec_actual": actual_sec,
+                "noisy_test": None if noisy_result is None else dict(
+                    noisy_result.to_dict(),
+                    max_attempts=self.noisy_config.max_attempts,
+                    config=json.loads(self.noisy_config.to_json()),
+                ),
                 "score_thresh": self.score_thresh_var.get(),  # single-shot mode only
                 "decision_method": "ewma_peak",
                 "decision_cutoff": self.decision_config.cutoff,
@@ -1331,9 +1568,11 @@ class ModelsTesterApp:
 
             res_str = f"POS ({score:.2f})" if predicted == 1 else f"NEG ({score:.2f})"
             self.log(f"Processed: {res_str}")
-                
+            return float(score)
+
         except Exception as e:
             self.log(f"Inference Error: {e}")
+            return None
 
     def update_plots(self):
         if not self.is_running:
@@ -1399,6 +1638,11 @@ class ModelsTesterApp:
                 self.ax_ewma.axhline(
                     self.decision_config.cutoff, color="red", linestyle=":", linewidth=1, label="Cutoff"
                 )
+                if self.noisy_session is not None and not self._noisy_closed and self._noisy_attempt_open:
+                    # Shade the windows the noisy test ignores.
+                    for t, quiet in zip(times, self.noisy_session.quiet_mask()):
+                        if not quiet:
+                            self.ax_ewma.axvspan(t - 0.25, t + 0.25, color="orange", alpha=0.3, linewidth=0)
                 self.ax_ewma.set_title("EWMA Decision Timeline", fontsize=9)
                 self.ax_ewma.set_ylim(0, 1)
                 self.ax_ewma.set_xlabel("Time (s)", fontsize=8)
