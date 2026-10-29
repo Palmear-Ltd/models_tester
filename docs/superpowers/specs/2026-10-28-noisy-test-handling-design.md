@@ -171,3 +171,13 @@ So, with a good detector, misses are halved and false alarms stay below the clea
 On the 2025 long recordings, whose infested signal is weaker (today: 78% caught clean, **9%** with cars), extending recovers almost nothing: even the road's quiet moments mask them. Only a strict TOO NOISY protects those trees.
 
 **What this means:** the state machine (`app/decision/noisy_test.py`, 22 tests) is sound and ready. What is missing is a noise detector that tells car noise apart from the ordinary variation of field recordings. Level alone cannot do it. Options are for the owner (see the plan's RESUME block).
+
+## Background level on real field recordings, 2026-10-29
+
+Question from the owner: is there a background level above which 9_1_2 stops working, whatever the noise type? Data: every 2026 20 s recording with 9_1_2 window scores (5,757: 5,045 healthy, 712 infested, about 40 sessions), no mixing. Scripts: `scripts/noisy_test_background/` (the table lives in the session scratchpad and is rebuilt by `build.py`).
+
+- **Infested trees are not missed in louder backgrounds.** Catch rate by median background: 74% below −60 dBFS (35 recordings), 89–92% from −60 to −45, 95–100% above −45. Within sessions, the loudest third vs the quietest third: 82.5% vs 87.4% (17 sessions, not consistent: 6 lower, 3 higher). Exception, with small n: tests whose background swings 20–30 dB caught 59% (17 recordings, 7 sessions).
+- **Healthy trees get more false alarms in louder backgrounds.** By median background: 13% below −60 dBFS, 23% at −55 to −50, 34% at −45 to −40, 51–55% above −35. Within sessions, the loudest third vs the quietest third: 24.9% vs 16.0%, louder worse in 29 of 40 sessions. Within a recording, healthy windows more than 6 dB above the recording's own median score +0.06 higher (34 of 41 sessions).
+- **Dropping the loud windows** (any hop more than X dB above the recording's 20th percentile), compared against dropping the same number of windows at random: X = 6 gives healthy positives 16.1% vs 21.3% and infested 87.0% vs 88.8%; X = 10 gives 21.1% vs 26.0% and 87.4% vs 89.5%. So the effect is real but modest: about 5 points fewer false alarms, for about 2 points fewer catches.
+- The false-alarm rate in these sets (24% overall; 15–33% by role) is far above the field estimate of about 3–4%; this has not been explained.
+- **Conclusion:** everyday background noise (not cars) causes **false alarms**, not misses. That supports D2: noisy windows should count for nothing in either direction. Cars, as mixed into recordings, cause misses. Both effects matter.
