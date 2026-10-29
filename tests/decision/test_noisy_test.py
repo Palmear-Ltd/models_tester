@@ -222,3 +222,12 @@ def test_result_records_what_was_seen():
     d = r.to_dict()
     json.dumps(d)
     assert d["verdict"] == HEALTHY
+
+
+def test_shipped_9_1_2_config_is_off_and_fitted():
+    import os
+    path = os.path.join(os.path.dirname(__file__), "..", "..", "models", "9_1_2", "noisy_test.json")
+    c = default_config(path)
+    assert c.enabled is False
+    assert c.noise_db == 10.0 and c.max_extra_sec == 40.0 and c.max_attempts == 1
+    assert c.cutoff == pytest.approx(CUTOFF)

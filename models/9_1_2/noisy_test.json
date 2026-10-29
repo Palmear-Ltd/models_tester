@@ -1,0 +1,16 @@
+{
+  "enabled": false,
+  "trim_percentile": 90.0,
+  "reference_quantile": 0.2,
+  "noise_db": 10.0,
+  "abs_noise_db": null,
+  "min_quiet_windows": 36,
+  "hops_per_window": 5,
+  "normal_hops": 40,
+  "max_extra_sec": 40.0,
+  "max_attempts": 1,
+  "repeat_pause_sec": 3.0,
+  "cutoff": 0.5696557745704712,
+  "span": 5.0,
+  "method": "quiet_windows_v1"
+}
