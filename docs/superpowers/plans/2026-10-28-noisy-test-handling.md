@@ -10,7 +10,7 @@ Update this block at the end of each task: what is done, the commit, the test co
 - **ALL TASKS DONE (2026-10-29).** Full suite: 402 passed, 2 skipped.
 - Bar 1 as first written ("flag at most 5% of normal tests") was the wrong bar. The owner restated the goal as fewer false positives. Real-recording evidence (commits `cbe2ece`, `5443106`) chose relative +10 dB with extend 40 s: false alarms −2 to −3 points out of about 24, catches unchanged.
 - Task 2 `dcfe842` (fitted config, off; 17 golden vectors) · Task 4 `817dac7` (tester wiring, `_NZ`, full-length WAV save) · Task 5 `b76cc4f` (`offline_score.py --noisy-test`, road replay) · Task 6: handover `docs/noisy-test/handover-mobile.md`, CLAUDE.md.
-- Waiting on the owner: GUI check, push/merge, enabling it, the phone parity answer (D3: 36 windows from the first full buffer?). Next work: the window-rules study (`training/window_pool_1/docs/superpowers/specs/2026-10-28-window-rules-study.md`).
+- Merged to main and pushed (e11f6e6). Waiting on: enabling it, the phone parity answer (D3: 36 windows from the first full buffer?). Next work: the window-rules study (`training/window_pool_1/docs/superpowers/specs/2026-10-28-window-rules-study.md`).
 
 ## Task 1 — Portable core `app/decision/noisy_test.py` (TDD)
 
