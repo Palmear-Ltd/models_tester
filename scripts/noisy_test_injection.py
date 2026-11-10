@@ -43,7 +43,7 @@ DATASET = os.path.join(WORKSPACE, "training/one_shot_1/dataset.csv")
 CATALOG = os.path.join(WORKSPACE, "audio/catalog.csv")
 AUDIO_ROOT = os.path.join(WORKSPACE, "audio")
 CAR_WAV = os.path.join(WORKSPACE, "long_recording_for_cars/2026-10-21 10.29.32.wav")
-CACHE = os.path.join(WORKSPACE, "training/9_1_5/.noisy_test_cache")
+CACHE = os.path.join(REPO, "scripts", ".noisy_test_cache")   # moved from training/9_1_5 (archived 2026-11-10)
 MODEL = os.path.join(REPO, "models/9_1_2")
 
 SR = o.TARGET_SR

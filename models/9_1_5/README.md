@@ -1,6 +1,6 @@
 # 9_1_5 (tester build, 2026-09-16 — second cut)
 
-Retrained for the thin piezo→preamp cable. Built in `../../training/9_1_5/`
+Retrained for the thin piezo→preamp cable. Built in `../../training/archive/9_1_5/` (archived 2026-11-10: trained on the wrong dataset, see `training/WINDOW_TRAINING_LESSONS.md`)
 (read its `README.md` for the data, the recipe and every number below); this is
 `runs/run4all_s43/release/` — the run-3 recipe (app-parity features, 2025–2026 +
 the Aug/Sep 2026 field sessions only, ≤ 28 chunks per file, SpecAugment, balanced

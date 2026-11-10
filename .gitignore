@@ -56,3 +56,7 @@ evaluation_report.csv
 evaluation_report_*.csv
 plots/
 test_data
+
+# Score/track caches moved from training/9_1_5 when it was archived (2026-11-10)
+scripts/.noisy_test_cache/
+scripts/noisy_test_background/.score_cache_9_1_2/

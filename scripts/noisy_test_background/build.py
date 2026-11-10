@@ -4,7 +4,7 @@ OUT=sys.argv[1]
 d=pd.read_csv("training/one_shot_1/dataset.csv")
 d=d[(d.year==2026)&(d.duration_s.round(1)==20.0)]
 sc={}
-for f in glob.glob("training/9_1_5/.score_cache/9_1_2/*.json"):
+for f in glob.glob("models_tester/scripts/noisy_test_background/.score_cache_9_1_2/*.json"):
     j=json.load(open(f)); sc.setdefault(os.path.basename(j["path"]),j["scores"])
 for p,s in json.load(open(os.path.join(os.path.dirname(OUT),"missing_scores.json"))).items(): sc.setdefault(os.path.basename(p),s)
 d=d[d.basename.isin(sc)].copy()
